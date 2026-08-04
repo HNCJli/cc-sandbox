@@ -6,3 +6,4 @@
 
 # workspace 是用户工作目录,不进 git
 workspace/
+.idea/
