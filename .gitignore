@@ -1,0 +1,8 @@
+# launch.ps1 运行时产物
+.ssh-key
+.ssh-key.pub
+.tunnel.pid
+.cloud-init.rendered.yaml
+
+# workspace 是用户工作目录,不进 git
+workspace/

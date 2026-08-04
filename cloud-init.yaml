@@ -1,0 +1,77 @@
+#cloud-init
+# 由 launch.ps1 渲染后再喂给 multipass launch --cloud-init
+# 占位符在 write_files 段:TMUX_CONF_PLACEHOLDER 和 SSH_PUBKEY_PLACEHOLDER
+# (注意:不要在注释里重复出现占位符字面量,会被 .Replace 误伤)
+
+hostname: claude-dev
+users:
+  - default   # 用现成的 ubuntu 用户(非 root, 免密 sudo, claude-code 不拒绝)
+
+package_update: true
+packages:
+  - git
+  - curl
+  - wget
+  - vim
+  - less
+  - jq
+  - ripgrep
+  - fd-find
+  - tmux
+  - openssh-server
+  - sudo
+  - locales
+  - ca-certificates
+
+write_files:
+  # TUI 渲染修复(替代原 Dockerfile 第 43 行的 /etc/bash.bashrc 写入)
+  - path: /etc/profile.d/00-tui-env.sh
+    permissions: '0644'
+    content: |
+      export TERM=xterm-256color
+      export COLORTERM=truecolor
+      export LANG=C.UTF-8
+      export LC_ALL=C.UTF-8
+
+  # settings.json 同步: 宿主机挂载的 .claude-host → VM 实际 .claude/(VM 内只读)
+  - path: /etc/profile.d/05-claude-config.sh
+    permissions: '0644'
+    content: |
+      # 每次开 shell 时,把宿主机 cc-switch 管理的 settings.json 同步进 VM,并设 RO
+      if [ -f "$HOME/.claude-host/settings.json" ]; then
+        mkdir -p "$HOME/.claude"
+        # rm -f 绕过前次 cp 设的 444,再 chmod 444 让 Claude Code 在 VM 里改不了
+        rm -f "$HOME/.claude/settings.json"
+        cp "$HOME/.claude-host/settings.json" "$HOME/.claude/settings.json"
+        chmod 444 "$HOME/.claude/settings.json"
+      fi
+
+  # tmux 配置(launch.ps1 把 tmux.conf 内容渲染进来)
+  # defer: true —— 等默认 ubuntu 用户创建后再写,避免 owner 失败
+  # 注意:占位符必须顶格(0 缩进),由 launch.ps1 给每行加 6 空格缩进
+  - path: /home/ubuntu/.tmux.conf
+    defer: true
+    permissions: '0644'
+    owner: ubuntu:ubuntu
+    content: |
+{{TMUX_CONF_PLACEHOLDER}}
+
+runcmd:
+  # 追加 launch.ps1 生成的公钥到现有 authorized_keys
+  # (不能用 write_files,会覆盖 Multipass 自带 key,把 multipass exec/shell 弄坏)
+  - echo "{{SSH_PUBKEY_PLACEHOLDER}}" >> /home/ubuntu/.ssh/authorized_keys
+  - chown ubuntu:ubuntu /home/ubuntu/.ssh/authorized_keys
+  - chmod 600 /home/ubuntu/.ssh/authorized_keys
+  - locale-gen C.UTF-8
+  - update-locale LANG=C.UTF-8
+  # Node 20(LTS)
+  - curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+  - apt-get install -y nodejs
+  # Claude Code
+  - npm install -g @anthropic-ai/claude-code
+  # (可选 Docker — 需要时取消下面 3 行注释,然后 ./launch.ps1 delete && ./launch.ps1 start)
+  # - apt-get install -y docker.io
+  # - usermod -aG docker ubuntu
+  # - systemctl enable --now docker
+
+final_message: "claude-dev cloud-init done after $UPTIME seconds"
