@@ -192,9 +192,6 @@ function Start-ClaudeDev {
     } else {
         Write-Warn "mount 失败(可能已挂载,继续)"
     }
-    # best-effort 让 VM 内的挂载源变 RO
-    & multipass exec $vmName -- sudo chmod -R a-w $mountClaudeHost 2>$null
-    Write-Ok ".claude-host RO(best-effort)"
 
     # 挂载 workspace
     Write-Step "挂载 workspace → VM $mountWorkspace..."
