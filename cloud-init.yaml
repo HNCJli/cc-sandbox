@@ -34,17 +34,37 @@ write_files:
       export LC_ALL=C.UTF-8
 
   # settings.json 同步: 宿主机挂载的 .claude-host → VM 实际 .claude/(VM 内只读)
+  # 白名单过滤:只提取 LLM 相关 env,其余字段(statusLine/mcpServers/hooks/permissions 等)不进 VM,VM 用 Claude Code 默认
   - path: /etc/profile.d/05-claude-config.sh
     permissions: '0644'
     content: |
-      # 每次开 shell 时,把宿主机 cc-switch 管理的 settings.json 同步进 VM,并设 RO
-      if [ -f "$HOME/.claude-host/settings.json" ]; then
+      # 把宿主机 cc-switch 的 LLM env 同步进 VM 的 settings.json(只读),其余字段一律丢弃
+      sync_claude_config() {
+        [ -f "$HOME/.claude-host/settings.json" ] || return 0
         mkdir -p "$HOME/.claude"
-        # rm -f 绕过前次 cp 设的 444,再 chmod 444 让 Claude Code 在 VM 里改不了
+        # 白名单:只保留 env(LLM token/base_url/模型等);非 JSON 时退化为空 env,保证能启动
+        { jq '{env: (.env // {})}' "$HOME/.claude-host/settings.json" 2>/dev/null || echo '{"env":{}}'; } \
+          > "$HOME/.claude/settings.json.tmp"
+        # rm 绕过前次 chmod 444,再设 444 让 Claude Code 在 VM 里改不了
         rm -f "$HOME/.claude/settings.json"
-        cp "$HOME/.claude-host/settings.json" "$HOME/.claude/settings.json"
+        mv "$HOME/.claude/settings.json.tmp" "$HOME/.claude/settings.json"
         chmod 444 "$HOME/.claude/settings.json"
-      fi
+      }
+      # 登录 shell 先同步一次(新开 shell 即生效)
+      sync_claude_config
+      # 每次敲 claude 前重新同步,cc-switch 切 provider 后同一 shell 也能立即生效
+      claude() {
+        sync_claude_config
+        command claude "$@"
+      }
+
+  # 兜底:非登录交互 shell(tmux 新窗口等)也加载 claude 同步函数
+  # (登录 shell 会经由 profile.d + bash.bashrc 各 source 一次,幂等无副作用)
+  - path: /etc/bash.bashrc
+    append: true
+    permissions: '0644'
+    content: |
+      [ -f /etc/profile.d/05-claude-config.sh ] && . /etc/profile.d/05-claude-config.sh
 
   # tmux 配置(launch.ps1 把 tmux.conf 内容渲染进来)
   # defer: true —— 等默认 ubuntu 用户创建后再写,避免 owner 失败

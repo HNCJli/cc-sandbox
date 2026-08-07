@@ -6,7 +6,7 @@
 
 ## 这是什么
 
-把 Claude Code 关进 Multipass Ubuntu VM。VM 是个沙箱,可以放心给最大权限;配置复用宿主机 cc-switch 写的同一份 `~/.claude/settings.json`(VM 内只读);workspace 像数据卷一样双向同步。
+把 Claude Code 关进 Multipass Ubuntu VM。VM 是个沙箱,可以放心给最大权限;配置仅复用宿主机 cc-switch 写的 **LLM env**(token / base_url / 模型映射,VM 内只读),其余字段一律过滤、用 Claude Code 默认配置;workspace 像数据卷一样双向同步。
 
 **核心机制**:cc-switch 在宿主机 `127.0.0.1:15721` 跑本地代理(只听 localhost),VM 跨网络连不上。本项目用 **SSH 反向隧道**把宿主机 `15721` ↔ VM `15721` 接通:VM 里 Claude Code 访问自己的 `127.0.0.1:15721`,流量被隧道偷渡回宿主机 cc-switch。cc-switch 完全零改动。
 
@@ -35,9 +35,9 @@ Windows 宿主机
      ├─ ubuntu 用户(非 root,免密 sudo)
      ├─ Claude Code                    npm 全局装
      ├─ tmux + TUI 修复
-     ├─ ~/.claude/settings.json        RO,cp 自 .claude-host/,Claude Code 改不了
+     ├─ ~/.claude/settings.json        只含 env(白名单),RO,Claude Code 改不了
      ├─ ~/.claude-host/                ← 宿主机 ~/.claude 整目录挂载(VM 内 RO)
-     ├─ /workspace                     ← ./workspace/ 持久挂载
+     ├─ ~/workspace                     ← ./workspace/ 持久挂载
      └─ 127.0.0.1:15721                ← SSH 反向隧道 ← 宿主机 cc-switch
 ```
 
@@ -48,7 +48,7 @@ Windows 宿主机
 | `cloud-init.yaml` | VM 装机脚本模板(含占位符,launch.ps1 渲染后喂给 multipass) |
 | `launch.ps1` | VM 生命周期管理(start / stop / restart / status / delete) + 隧道保活 |
 | `tmux.conf` | tmux 配置,cloud-init 渲染时注入 VM |
-| `workspace/` | 工作目录,挂到 VM `/workspace`,VM 重建不丢(首次 start 自动创建) |
+| `workspace/` | 工作目录,挂到 VM `~/workspace`,VM 重建不丢(首次 start 自动创建) |
 
 ## 前置
 
@@ -97,8 +97,16 @@ netstat -ano | findstr 15721
 1. 开启 Multipass privileged-mounts(首次会触发 multipassd 重启,正常现象)
 2. 创建/唤醒 VM
 3. 挂载 `~/.claude` → VM `/home/ubuntu/.claude-host`(RO)
-4. 挂载 `./workspace/` → VM `/workspace`
+4. 挂载 `./workspace/` → VM `~/workspace`
 5. 后台拉 SSH 反向隧道(`.tunnel.pid` 记录进程号)
+
+**挂自定义目录**:加 `-WorkspaceHost` 指定宿主机任意已存在的目录,代替默认的项目下 `./workspace`:
+
+```powershell
+.\launch.ps1 start -WorkspaceHost D:\code\myrepo
+```
+
+VM 里仍挂到 `~/workspace`(位置不变)。换目录时直接再 `start` 一次即可,无需 `restart`。
 
 ### 进 VM
 
@@ -125,9 +133,10 @@ tmux new -s work                        # tmux 会话
 
 ### 改 Claude 配置
 
-宿主机用 cc-switch UI 切 provider / 改 `~/.claude/settings.json` 后:
-- VM 里**新开 shell** 会自动同步(profile 脚本每次开 shell 时 cp 一遍)
-- 已开的 shell 不受影响
+宿主机用 cc-switch UI 切 provider / 改 `~/.claude/settings.json` 后,VM 会自动同步 **LLM 相关 env**(token / base_url / 模型映射)。同步是**白名单**:只提取 `env` 字段,statusLine / mcpServers / hooks / permissions 等一律不进 VM,其余走 Claude Code 默认配置。
+
+- VM 里每次敲 `claude` 前会自动重新同步,**同一 shell 内切 provider 后立即生效**
+- 新开 shell 也会同步一次(profile 脚本)
 
 VM 里 `~/.claude/settings.json` 是 `chmod 444`,**Claude Code 在 VM 里改不了**,只能从宿主机改。
 
@@ -200,7 +209,7 @@ cloud-init 留了注释掉的 Docker 安装代码块。需要时编辑 `cloud-in
 multipass exec claude-dev -- curl -v http://127.0.0.1:15721/
 # connection refused → 隧道断了,restart
 
-# 3. settings.json 同步了吗
+# 3. settings.json 同步了吗(应只含 env,无 statusLine/mcpServers 等)
 multipass exec claude-dev -- cat /home/ubuntu/.claude/settings.json
 ```
 
@@ -228,7 +237,7 @@ Multipass 1.16+ 默认禁 privileged-mounts。`launch.ps1 start` 首次会自动
    ```powershell
    New-Item -ItemType Junction -Path C:\dev\workspace -Target "<项目实际路径>\workspace"
    ```
-   然后编辑 `launch.ps1` 的 `$wsHost` 指向 junction
+   然后 `.\launch.ps1 start -WorkspaceHost C:\dev\workspace` 用 junction 路径启动
 
 **`~/.claude` 挂不上**:用 junction:
 ```powershell

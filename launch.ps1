@@ -12,7 +12,11 @@
 param(
     [Parameter(Position = 0)]
     [ValidateSet("start", "stop", "restart", "status", "delete")]
-    [string]$Action = "start"
+    [string]$Action = "start",
+
+    # 宿主机要挂进 VM ~/workspace 的目录;空 = 用项目下 ./workspace(默认,向后兼容)
+    [Parameter()]
+    [string]$WorkspaceHost = ""
 )
 
 # PS 5.1 把 native 命令的 stderr 当 terminating error,会让 multipass info(VM 不存在时)直接挂掉
@@ -29,7 +33,7 @@ $memoryGB       = 4
 $diskGB         = 20
 $ccSwitchPort   = 15721                                # cc-switch 在宿主机监听的端口
 $mountClaudeHost = "/home/ubuntu/.claude-host"          # 宿主机 ~/.claude 挂到 VM 哪里
-$mountWorkspace = "/workspace"                          # ./workspace 挂到 VM 哪里
+$mountWorkspace = "/home/ubuntu/workspace"              # ./workspace 挂到 VM 哪里(放在 ~/ 下)
 
 # ====== 日志 helpers ======
 function Write-Step($msg) { Write-Host "==> $msg" -ForegroundColor Cyan }
@@ -125,12 +129,14 @@ function Stop-Tunnel {
 function Start-ClaudeDev {
     Assert-Prerequisites
 
-    # 隧道孤儿进程清理
+    # 隧道复用/清理:start 幂等可反复跑。旧隧道停掉由后面流程重起
+    # (原版这里 throw 会挡住"start 热切换 workspace",改成停旧重起)
     $pidFile = Join-Path $scriptDir ".tunnel.pid"
     if (Test-Path $pidFile) {
         $oldPid = (Get-Content $pidFile -First 1).Trim()
         if ($oldPid -and (Get-Process -Id $oldPid -ErrorAction SilentlyContinue)) {
-            throw "已有隧道进程在跑(PID $oldPid)。先 .\launch.ps1 stop 再 start。"
+            Stop-Process -Id $oldPid -Force
+            Write-Warn "停旧隧道 PID $oldPid(start 流程会重起新隧道)"
         }
         Remove-Item $pidFile -Force -ErrorAction SilentlyContinue
     }
@@ -192,11 +198,23 @@ function Start-ClaudeDev {
 
     # 挂载 workspace
     Write-Step "挂载 workspace → VM $mountWorkspace..."
-    $wsHost = Join-Path $scriptDir "workspace"
-    if (-not (Test-Path $wsHost)) {
-        New-Item -ItemType Directory -Path $wsHost | Out-Null
-        Write-Warn "workspace/ 不存在,已新建空目录"
+    if ($WorkspaceHost) {
+        # 用户显式指定宿主机 workspace 目录:必须已存在,不自动创建
+        if (-not (Test-Path $WorkspaceHost -PathType Container)) {
+            throw "-WorkspaceHost 必须是已存在的目录: $WorkspaceHost"
+        }
+        $wsHost = (Resolve-Path $WorkspaceHost).Path
+        Write-Step "使用自定义 workspace 源: $wsHost"
+    } else {
+        # 默认:项目下 ./workspace(保持原行为)
+        $wsHost = Join-Path $scriptDir "workspace"
+        if (-not (Test-Path $wsHost)) {
+            New-Item -ItemType Directory -Path $wsHost | Out-Null
+            Write-Warn "workspace/ 不存在,已新建空目录"
+        }
     }
+    # 换源时清掉 VM 内 ~/workspace 旧挂载,避免"目标已被占用"冲突(首次挂载时 umount 会失败,忽略)
+    & multipass umount "${vmName}:${mountWorkspace}" 2>$null
     & multipass mount $wsHost "${vmName}:${mountWorkspace}" 2>$null
     if ($LASTEXITCODE -eq 0) {
         Write-Ok "挂载完成"
