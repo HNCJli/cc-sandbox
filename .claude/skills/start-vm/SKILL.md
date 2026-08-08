@@ -64,13 +64,19 @@ claude --dangerously-skip-permissions
 
 ### cc-pocket(可选,手机遥控)
 
-VM 里预装了 cc-pocket daemon。首次配对(VM 内):
+VM 里预装了 cc-pocket daemon,正常情况下 `delete + start` 重建后已自启。
 
+**首次配对**(VM 内):
 ```bash
 cc-pocket-daemon pair   # 出 QR + 6 位码,手机 App 扫一下
 ```
 
-配对后 daemon 由 systemd 用户服务托管,VM 重启自动起。手机 App 从 [cc-pocket 项目](https://github.com/heypandax/cc-pocket) README 列出的商店下载。
+若 pair 报 `no daemon on 127.0.0.1:8799`(cloud-init 阶段 D-Bus 没起来,服务没注册),手动补一次注册:
+```bash
+cc-pocket-daemon service-install --apply --exec ~/.local/bin/cc-pocket-daemon
+systemctl --user enable --now cc-pocket-daemon
+```
+之后配对即可。配对一次后 daemon 由 systemd 用户服务托管,VM 重启自动起(linger 已开)。手机 App 从 [cc-pocket 项目](https://github.com/heypandax/cc-pocket) README 列出的商店下载。
 
 ## 常用子命令
 

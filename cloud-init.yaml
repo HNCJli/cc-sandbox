@@ -103,11 +103,17 @@ runcmd:
   # - usermod -aG docker ubuntu
   # - systemctl enable --now docker
   # cc-pocket daemon(手机遥控 Claude Code;自带 JRE,只需 curl+tar)
-  # 装到 ~/.local/share/cc-pocket/,软链到 ~/.local/bin/cc-pocket-daemon
-  # 用 ubuntu 用户跑(不能 root);配对进 VM 跑 cc-pocket-daemon pair
-  # install.sh 里的 systemctl --user 在 cloud-init 阶段多半注册不上(没 D-Bus user session),
-  # 不影响 daemon 文件落地,首次 pair 时会真正起来 + 完成服务注册
+  # 装到 ~/.local/share/cc-pocket/versions/,软链到 ~/.local/bin/cc-pocket-daemon
+  # 用 ubuntu 用户跑(不能 root)
+  # 关键:必须先起 user@1000 + 显式给 XDG_RUNTIME_DIR,cloud-init 上下文没 D-Bus user session,
+  # install.sh 里 systemctl --user show-environment 失败会跳过 service-install,daemon 不会自起
   - loginctl enable-linger ubuntu
-  - sudo -u ubuntu bash -c 'curl -fsSL https://raw.githubusercontent.com/heypandax/cc-pocket/main/scripts/install.sh | bash'
+  - |
+    systemctl start user@1000.service
+    for i in $(seq 1 20); do [ -S /run/user/1000/bus ] && break; sleep 0.5; done
+    sudo -u ubuntu \
+        XDG_RUNTIME_DIR=/run/user/1000 \
+        DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus \
+        bash -c 'curl -fsSL https://raw.githubusercontent.com/heypandax/cc-pocket/main/scripts/install.sh | bash'
 
 final_message: "claude-dev cloud-init done after $UPTIME seconds"
