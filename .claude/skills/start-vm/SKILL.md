@@ -62,6 +62,16 @@ claude --dangerously-skip-permissions
 
 每次敲 `claude` 前 profile 脚本会自动重新同步 env,宿主机 cc-switch 切 provider 后 VM 会跟上。
 
+### cc-pocket(可选,手机遥控)
+
+VM 里预装了 cc-pocket daemon。首次配对(VM 内):
+
+```bash
+cc-pocket-daemon pair   # 出 QR + 6 位码,手机 App 扫一下
+```
+
+配对后 daemon 由 systemd 用户服务托管,VM 重启自动起。手机 App 从 [cc-pocket 项目](https://github.com/heypandax/cc-pocket) README 列出的商店下载。
+
 ## 常用子命令
 
 ```powershell

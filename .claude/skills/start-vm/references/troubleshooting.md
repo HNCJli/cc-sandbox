@@ -15,7 +15,7 @@ multipass launch 失败
 ```
 但网络正常、`multipass version` 正常。
 
-**根因**:Multipass 全局配了非官方镜像源(常见于国内加速,如清华 TUNA),而该源的 simplestreams 索引解析不出 `noble` 别名对应的 remote。
+**根因**:Multipass 全局配了非官方镜像源(常见于国内加速,如清华 TUNA),而该源的 simplestreams 索引解析不出 `resolute` 别名对应的 remote。
 
 **诊断**:
 ```powershell
@@ -30,7 +30,7 @@ multipass set local.image.mirror=
 清空后恢复官方源。验证:
 ```powershell
 multipass get local.image.mirror     # 应为空
-multipass find                        # 应能列出 24.04 / noble 别名
+multipass find                        # 应能列出 26.04 / resolute 别名
 ```
 然后重跑 `.\launch.ps1 start`。
 

@@ -31,7 +31,7 @@ Windows 宿主机
 ├─ ~/.claude/settings.json            cc-switch 管理
 ├─ launch.ps1                         管 VM 生命周期 + SSH 反向隧道保活
 │    └─ ssh -R 15721:127.0.0.1:15721  宿主机 → VM 的反向隧道
-└─ Multipass VM "claude-dev"          Ubuntu 24.04
+└─ Multipass VM "claude-dev"          Ubuntu 26.04
      ├─ ubuntu 用户(非 root,免密 sudo)
      ├─ Claude Code                    npm 全局装
      ├─ tmux + TUI 修复

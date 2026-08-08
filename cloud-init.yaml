@@ -66,6 +66,15 @@ write_files:
     content: |
       [ -f /etc/profile.d/05-claude-config.sh ] && . /etc/profile.d/05-claude-config.sh
 
+  # 把 ~/.local/bin 加进 PATH(cc-pocket-daemon 装在这里,否则敲不出来)
+  - path: /etc/profile.d/06-local-bin.sh
+    permissions: '0644'
+    content: |
+      case ":$PATH:" in
+        *":$HOME/.local/bin:"*) ;;
+        *) export PATH="$HOME/.local/bin:$PATH" ;;
+      esac
+
   # tmux 配置(launch.ps1 把 tmux.conf 内容渲染进来)
   # defer: true —— 等默认 ubuntu 用户创建后再写,避免 owner 失败
   # 注意:占位符必须顶格(0 缩进),由 launch.ps1 给每行加 6 空格缩进
@@ -93,5 +102,12 @@ runcmd:
   # - apt-get install -y docker.io
   # - usermod -aG docker ubuntu
   # - systemctl enable --now docker
+  # cc-pocket daemon(手机遥控 Claude Code;自带 JRE,只需 curl+tar)
+  # 装到 ~/.local/share/cc-pocket/,软链到 ~/.local/bin/cc-pocket-daemon
+  # 用 ubuntu 用户跑(不能 root);配对进 VM 跑 cc-pocket-daemon pair
+  # install.sh 里的 systemctl --user 在 cloud-init 阶段多半注册不上(没 D-Bus user session),
+  # 不影响 daemon 文件落地,首次 pair 时会真正起来 + 完成服务注册
+  - loginctl enable-linger ubuntu
+  - sudo -u ubuntu bash -c 'curl -fsSL https://raw.githubusercontent.com/heypandax/cc-pocket/main/scripts/install.sh | bash'
 
 final_message: "claude-dev cloud-init done after $UPTIME seconds"

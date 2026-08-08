@@ -27,7 +27,7 @@ Set-Location $scriptDir
 
 # ====== 配置 ======
 $vmName         = "claude-dev"
-$image          = "noble"                              # Ubuntu 24.04 LTS
+$image          = "resolute"                           # Ubuntu 26.04 LTS
 $cpus           = 2
 $memoryGB       = 4
 $diskGB         = 20
@@ -40,6 +40,165 @@ function Write-Step($msg) { Write-Host "==> $msg" -ForegroundColor Cyan }
 function Write-Ok($msg)   { Write-Host "    OK  $msg" -ForegroundColor Green }
 function Write-Warn($msg) { Write-Host "    !   $msg" -ForegroundColor Yellow }
 
+# ====== multipass 命令超时包装 + daemon 自愈 ======
+# multipassd 在 Windows 上不稳定(尤其 1.16.x),所有调用必须走超时包装,避免 daemon 卡死时连锁失败
+
+# 调一次 multipass 命令,带硬超时,绝不抛异常,返回 hashtable 让调用方决定
+# 不能用 Start-Process -PassThru + 重定向:PS 5.x bug —— 这种组合下 $proc.ExitCode 始终为 null,
+# 所有命令都会被误判为失败,触发 daemon 自愈误杀健康 daemon
+# 改用 [System.Diagnostics.Process] 直接管理,ExitCode 字段可正确读取
+function Invoke-Multipass {
+    param(
+        [Parameter(Mandatory)] [string[]]$ArgumentList,
+        [int]$TimeoutSec = 60
+    )
+    # 缓存 multipass.exe 全路径(每次 Get-Command 太慢)
+    if (-not $script:multipassExe) {
+        $script:multipassExe = (Get-Command multipass -ErrorAction Stop).Source
+    }
+
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $script:multipassExe
+    # 拼接 args,含空格/引号的加引号转义(multipass 参数多为简单 token,workspace 路径可能含空格)
+    $psi.Arguments = ($ArgumentList | ForEach-Object {
+        if ($_ -match '[\s"]') { '"' + ($_ -replace '"','\"') + '"' } else { $_ }
+    }) -join ' '
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.CreateNoWindow = $true
+    # UTF-8 输出(避免中文/非 ASCII 路径乱码)
+    $psi.StandardOutputEncoding = New-Object System.Text.UTF8Encoding($false)
+    $psi.StandardErrorEncoding = New-Object System.Text.UTF8Encoding($false)
+
+    $proc = New-Object System.Diagnostics.Process
+    $proc.StartInfo = $psi
+
+    [void]$proc.Start()
+    # 异步读 stdout/stderr 防止管道死锁(同步 ReadToEnd 会卡死,标准输出写满 buffer 时)
+    $outTask = $proc.StandardOutput.ReadToEndAsync()
+    $errTask = $proc.StandardError.ReadToEndAsync()
+
+    $exited = $proc.WaitForExit($TimeoutSec * 1000)
+    if (-not $exited) {
+        try { $proc.Kill() } catch {}
+        try { $proc.WaitForExit(2000) | Out-Null } catch {}
+        return @{
+            ExitCode = -1
+            TimedOut = $true
+            Stdout   = ''
+            Stderr   = "multipass $($ArgumentList -join ' ') 超时(${TimeoutSec}s)"
+        }
+    }
+
+    # 等 async 读取完成(进程已退出,任务也会很快完成)
+    $stdout = ''
+    $stderr = ''
+    try { $stdout = $outTask.Result } catch {}
+    try { $stderr = $errTask.Result } catch {}
+
+    return @{
+        ExitCode = $proc.ExitCode
+        TimedOut = $false
+        Stdout   = $stdout
+        Stderr   = $stderr
+    }
+}
+
+# 快速探测 daemon 是否响应。绝不自愈,自愈在调用方
+# 用 list 而非 version:version 只查进程在不在,daemon 重启后有"半活"窗口(version 秒回但 info/list 卡)
+# list 需要查 Hyper-V 后端,能确保 daemon 真正可服务 VM 查询
+function Assert-DaemonHealthy {
+    $r = Invoke-Multipass -ArgumentList @('list') -TimeoutSec 10
+    return (-not $r.TimedOut) -and ($r.ExitCode -eq 0)
+}
+
+# 轮询等 daemon 恢复(给 set privileged-mounts 后用)
+function Wait-DaemonHealthy {
+    param([int]$TimeoutSec = 60, [int]$IntervalSec = 2)
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        if (Assert-DaemonHealthy) { return $true }
+        Start-Sleep -Seconds $IntervalSec
+    }
+    return $false
+}
+
+# kill daemon + GUI + 客户端,等 watchdog 拉起新 daemon。返回 bool。
+# daemon 是 multipass.gui.exe 托管的(不是 Windows 服务),GUI 内有 watchdog 会拉起 daemon
+# 关键:必须连 GUI 一起杀!只杀 daemon 时,GUI 持有的 Hyper-V 句柄/连接不释放,
+# 新 daemon 起来后还是连不上 Hyper-V(list 永远 timeout)。GUI 重启后才会重建这些句柄。
+# 实测验证:杀 daemon 不杀 GUI → 新 daemon 仍卡;杀 daemon+GUI → 新 daemon 立即可用
+function Reset-Daemon {
+    param([int]$RecoverTimeoutSec = 60)
+    # 注意:PS 5.1 上 Stop-Process -Name a,b 要求两进程都在,任一缺失整个命令就报错且不 kill 另一个
+    # 所以分多次,-ErrorAction SilentlyContinue 容错
+    # 进程名核对(Stop-Process 是精确匹配,不是前缀):
+    #   multipassd     = daemon(必须杀)
+    #   multipass.gui  = GUI(必须杀,持有 Hyper-V 句柄的关键)
+    #   multipass      = CLI 客户端(只在命令执行时短暂存在,通常查不到)
+    # 之前写 -Name multipass 想杀 GUI,实际匹配不到任何进程 —— 这是 daemon 卡死救不回来的真因
+    Stop-Process -Name multipassd    -Force -ErrorAction SilentlyContinue
+    Stop-Process -Name multipass.gui -Force -ErrorAction SilentlyContinue
+    Stop-Process -Name multipass     -Force -ErrorAction SilentlyContinue
+    # 给 OS 时间让进程真的退出 + 释放 Hyper-V 句柄(关键!太快会拉起不健康的 daemon)
+    Start-Sleep -Milliseconds 1500
+    $ok = Wait-DaemonHealthy -TimeoutSec $RecoverTimeoutSec
+    if ($ok) {
+        # daemon list 探测通了,但新 daemon 内部状态可能还没完全稳定(容易"刚活又卡")
+        # 多等几秒让 Hyper-V 后端连接完全建立 + watchdog 完整初始化
+        Start-Sleep -Seconds 5
+    }
+    return $ok
+}
+
+# 失败时 Reset-Daemon 一次后重试,仍失败抛中文错误
+# 注意:成功/失败只看 ExitCode 和 TimedOut,multipass 成功时也会往 stderr 写警告(如 mount 时)
+function Invoke-MultipassWithRecovery {
+    param(
+        [Parameter(Mandatory)] [string[]]$ArgumentList,
+        [int]$TimeoutSec = 60
+    )
+    $r = Invoke-Multipass -ArgumentList $ArgumentList -TimeoutSec $TimeoutSec
+    if ($r.TimedOut -or $r.ExitCode -ne 0) {
+        Write-Warn "multipass $($ArgumentList -join ' ') 失败/超时,正在重置 daemon..."
+        if (-not (Reset-Daemon)) {
+            throw "daemon 自动重置失败。建议:任务管理器结束 multipass.gui.exe 后重新打开 Multipass GUI,或重启电脑。"
+        }
+        Write-Ok "daemon 已恢复,重试命令"
+        $r = Invoke-Multipass -ArgumentList $ArgumentList -TimeoutSec $TimeoutSec
+        if ($r.TimedOut -or $r.ExitCode -ne 0) {
+            $err = if ($r.Stderr) { $r.Stderr.Trim() } else { "(无 stderr)" }
+            throw "重试仍失败:multipass $($ArgumentList -join ' ') ExitCode=$($r.ExitCode) stderr=$err"
+        }
+    }
+    return $r
+}
+
+# mount 专用 wrapper:成功/已挂载/失败重试,失败时只警告不抛错(保持原版"继续"语义)
+# "already mounted" 视为幂等成功,不触发 Reset
+function Try-Mount {
+    param(
+        [Parameter(Mandatory)] [string[]]$MountArgs,
+        [Parameter(Mandatory)] [string]$Description,
+        [string]$FailureHint = ""
+    )
+    foreach ($attempt in 1..2) {
+        $r = Invoke-Multipass -ArgumentList $MountArgs -TimeoutSec 60
+        if ($r.ExitCode -eq 0 -or $r.Stderr -match 'already mounted|already.*mount') {
+            Write-Ok "$Description 完成"
+            return $true
+        }
+        if ($attempt -eq 1) {
+            Write-Warn "$Description 失败/超时,重置 daemon 重试..."
+            if (-not (Reset-Daemon)) { break }
+        }
+    }
+    $err = if ($r.Stderr) { $r.Stderr.Trim() } else { "daemon 重置失败或超时" }
+    Write-Warn "$Description 失败:$err $FailureHint"
+    return $false
+}
+
 # ====== 前置检查 ======
 function Assert-Prerequisites {
     if (-not (Get-Command multipass -ErrorAction SilentlyContinue)) {
@@ -51,33 +210,84 @@ function Assert-Prerequisites {
     if (-not (Get-Command ssh-keygen -ErrorAction SilentlyContinue)) {
         throw "ssh-keygen 未找到。同上,装 OpenSSH。"
     }
+    # daemon 健康检查:不健康就自愈一次,失败抛错(避免后续命令连锁失败)
+    if (-not (Assert-DaemonHealthy)) {
+        Write-Warn "multipassd 无响应,正在重置..."
+        if (-not (Reset-Daemon)) {
+            throw "multipassd 自动重置失败。建议:任务管理器结束 multipass.gui.exe 后重新打开 Multipass GUI,或重启电脑。"
+        }
+        Write-Ok "daemon 已恢复"
+    }
     # Multipass 1.16+ 默认禁用 privileged mounts,需开启才能挂宿主机目录
-    # 注意:这一步会重启 multipassd 服务,把已运行的 VM 挂起。所以只在值未设时执行,且最好在 launch 前
-    $cur = & multipass get local.privileged-mounts 2>$null
-    if ($LASTEXITCODE -ne 0 -or $cur.Trim() -ne "true") {
-        Write-Step "开启 Multipass privileged-mounts (首次会重启 multipassd)..."
-        & multipass set local.privileged-mounts=true
-        if ($LASTEXITCODE -eq 0) { Write-Ok "已开启" } else { Write-Warn "set 失败,挂载可能不可用" }
+    # 注意:set 会重启 multipassd,所以只在值未设时执行,且 set 后必须等 daemon 恢复
+    $cur = Invoke-Multipass -ArgumentList @('get', 'local.privileged-mounts') -TimeoutSec 15
+    $needsSet = $cur.ExitCode -ne 0 -or (-not $cur.Stdout) -or $cur.Stdout.Trim() -ne "true"
+    if ($needsSet) {
+        Write-Step "开启 Multipass privileged-mounts (会重启 multipassd)..."
+        $setR = Invoke-Multipass -ArgumentList @('set', 'local.privileged-mounts=true') -TimeoutSec 30
+        if ($setR.ExitCode -ne 0 -and -not $setR.TimedOut) {
+            # set 失败但不是超时(超时说明 daemon 重启中,正常)
+            $err = if ($setR.Stderr) { $setR.Stderr.Trim() } else { "(无 stderr)" }
+            Write-Warn "set 失败: $err (挂载可能不可用)"
+        }
+        # 关键:set 触发 daemon 重启,必须等恢复,否则后续 launch/info 撞死 daemon
+        Write-Step "等 daemon 重启恢复(开启 privileged-mounts 需要)..."
+        if (-not (Wait-DaemonHealthy -TimeoutSec 60)) {
+            throw "开启 privileged-mounts 后 daemon 未在 60s 内恢复。建议手动重启 Multipass GUI 后重试。"
+        }
+        Write-Ok "privileged-mounts 已开启,daemon 已恢复"
     }
 }
 
-# ====== VM 是否存在 ======
+# ====== VM 是否存在(三态:exists / absent / unknown) ======
+# 关键:绝不在不确定时返回 absent —— 否则上层会跑去 launch 新 VM 把现有 VM 搞乱
+# 用 list 而非 info:list 跟 Assert-DaemonHealthy 用同一命令,避免"健康检查通但实际命令卡"错位
+# 且 list 比 info 轻,daemon 重启后 list 比 info 早可用
 function Test-VmExists {
-    $null = & multipass info $vmName --format csv 2>&1
-    return ($LASTEXITCODE -eq 0)
+    foreach ($i in 1..3) {
+        $r = Invoke-Multipass -ArgumentList @('list', '--format', 'csv') -TimeoutSec 10
+        if ($r.ExitCode -eq 0) {
+            # CSV 第一行 header,后续行数据。grep "<vmName>,"
+            $match = $r.Stdout -split "`r?`n" | Where-Object { $_ -like "$vmName,*" }
+            if ($match) { return 'exists' }
+            return 'absent'  # list 成功但 VM 不在列表
+        }
+        # 超时或 daemon 错误,继续重试
+        Start-Sleep -Seconds 2
+    }
+    # 3 次都失败 → 重置 daemon 再试一次
+    Write-Warn "multipass list 多次超时,重置 daemon..."
+    if (Reset-Daemon) {
+        $r = Invoke-Multipass -ArgumentList @('list', '--format', 'csv') -TimeoutSec 15
+        if ($r.ExitCode -eq 0) {
+            $match = $r.Stdout -split "`r?`n" | Where-Object { $_ -like "$vmName,*" }
+            if ($match) { return 'exists' }
+            return 'absent'
+        }
+    }
+    # 仍不确定 → 返回 unknown,绝不返回 absent(避免误 launch)
+    Write-Warn "无法确认 VM 状态(daemon 抽风)"
+    return 'unknown'
 }
 
 # ====== VM 是否在 Running ======
 function Get-VmState {
-    if (-not (Test-VmExists)) { return $null }
-    $info = (& multipass info $vmName --format csv 2>&1) | Select-Object -Skip 1
-    # CSV header: Name,State,IPv4,Image,ReleaseNotes
-    return ($info -split ',')[1]
+    # 用 list 而非 info:跟 Test-VmExists / Assert-DaemonHealthy 用同一命令,
+    # 避免"健康探测通但 info 卡"的错位;list 也比 info 轻,daemon 重启后早可用
+    $r = Invoke-Multipass -ArgumentList @('list', '--format', 'csv') -TimeoutSec 15
+    if ($r.ExitCode -ne 0) { return $null }
+    # CSV 第一行 header,找 vmName 开头那一行
+    $dataLine = ($r.Stdout -split "`r?`n" | Where-Object { $_ -like "$vmName,*" } | Select-Object -First 1)
+    if (-not $dataLine) { return $null }
+    return ($dataLine -split ',')[1]
 }
 
 function Get-VmIp {
-    $info = (& multipass info $vmName --format csv 2>&1) | Select-Object -Skip 1
-    return ($info -split ',')[2]
+    $r = Invoke-Multipass -ArgumentList @('list', '--format', 'csv') -TimeoutSec 15
+    if ($r.ExitCode -ne 0) { return $null }
+    $dataLine = ($r.Stdout -split "`r?`n" | Where-Object { $_ -like "$vmName,*" } | Select-Object -First 1)
+    if (-not $dataLine) { return $null }
+    return ($dataLine -split ',')[2]
 }
 
 # ====== 渲染 cloud-init ======
@@ -155,43 +365,84 @@ function Start-ClaudeDev {
 
     # 启动或唤醒 VM
     Write-Step "启动 VM(首次 3-5 分钟,cloud-init 装 Node + Claude Code)..."
-    if (Test-VmExists) {
-        $state = Get-VmState
-        if ($state -eq "Running") {
-            Write-Warn "VM 已在 Running,start 改为只重挂/重起隧道"
-        } else {
-            multipass start $vmName
-            Write-Ok "VM 从 $state 唤醒"
+    # 三态判断:绝不因 daemon 抽风误判 VM 不存在跑去 launch 新的(会把现有 VM 搞乱)
+    switch (Test-VmExists) {
+        'unknown' {
+            throw "无法确认 VM 是否存在(daemon 异常)。请手动 'multipass list' 检查后再跑,以免误操作现有 VM"
         }
-    } else {
-        $args = @("launch", "--name", $vmName,
-                  "--cpus", $cpus,
-                  "--memory", "${memoryGB}G",
-                  "--disk", "${diskGB}G",
-                  "--cloud-init", $renderedPath,
-                  $image)
-        & multipass @args
-        if ($LASTEXITCODE -ne 0) { throw "multipass launch 失败" }
-        Write-Ok "VM 创建并启动"
+        'exists' {
+            $state = Get-VmState
+            if ($state -eq "Running") {
+                Write-Warn "VM 已在 Running,start 改为只重挂/重起隧道"
+            } else {
+                Write-Step "唤醒 VM..."
+                Invoke-MultipassWithRecovery -ArgumentList @('start', $vmName) -TimeoutSec 90 | Out-Null
+                Write-Ok "VM 从 $state 唤醒"
+            }
+        }
+        'absent' {
+            $launchArgs = @("launch", "--name", $vmName,
+                            "--cpus", $cpus,
+                            "--memory", "${memoryGB}G",
+                            "--disk", "${diskGB}G",
+                            "--cloud-init", $renderedPath,
+                            "--timeout", "1200",
+                            $image)
+            # launch 不走 WithRecovery:重启 daemon 会让正在创建的 VM 状态更乱
+            # 用裸 Invoke-Multipass 超时;超时后用 exec 旁路探测 VM 真实状态
+            # --timeout 1200 把 multipass CLI 自己的超时从默认 5 分钟拉到 20 分钟
+            # PS 端给 1300s 留 100s 缓冲,让 multipass 的 --timeout 先触发(我们走友好恢复路径)
+            $r = Invoke-Multipass -ArgumentList $launchArgs -TimeoutSec 1300
+
+            $needProbe = $false
+            if ($r.TimedOut) {
+                # cloud-init 5.x 偶发完成信号丢失,multipass launch 一直等 —— VM 其实可能已就绪
+                Write-Warn "multipass launch 超时(20 分钟),验证 VM 实际状态..."
+                $needProbe = $true
+            } elseif ($r.ExitCode -ne 0) {
+                $err = if ($r.Stderr) { $r.Stderr.Trim() } else { "(无 stderr)" }
+                # multipass 自己的 --timeout 触发:VM 可能其实好的,走旁路探测
+                # "timed out waiting for initialization" 是 multipass 1.16.x 的固定字面量
+                if ($err -match 'timed out waiting for initialization') {
+                    Write-Warn "multipass launch 自身超时触发,验证 VM 实际状态..."
+                    $needProbe = $true
+                } else {
+                    # 真错误(镜像名错、Hyper-V 拒绝创建等),不绕过
+                    throw "multipass launch 失败(ExitCode=$($r.ExitCode)): $err"
+                }
+            }
+            if ($needProbe) {
+                $probe = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'cloud-init', 'status') -TimeoutSec 30
+                if ($probe.ExitCode -eq 0 -and $probe.Stdout -match 'status:\s+(done|running)') {
+                    $probeStatus = $Matches[1]
+                    Write-Warn "VM 实际已就绪(cloud-init $probeStatus),launch 没返回信号是已知 bug,继续后续步骤"
+                } else {
+                    $probeErr = if ($probe.Stderr) { $probe.Stderr.Trim() } else { "(无 stderr)" }
+                    throw "multipass launch 超时且 VM 未就绪。建议:.\launch.ps1 delete 清理后重试。日志:%USERPROFILE%\.multipass\data\`n旁路探测 ExitCode=$($probe.ExitCode) stdout=$($probe.Stdout) stderr=$probeErr"
+                }
+            }
+            Write-Ok "VM 创建并启动"
+        }
     }
 
     # 等 cloud-init(只有新 launch 会真的跑 runcmd,但 --wait 对已 done 的会立即返回)
     Write-Step "等 cloud-init 完成..."
-    & multipass exec $vmName -- cloud-init status --wait
-    if ($LASTEXITCODE -ne 0) {
-        Write-Warn "cloud-init status --wait 返回非零(可能是已 done 后再查的 transient 状态),继续"
+    # 不走 WithRecovery:cloud-init 偶发 schema validation 警告会让 ExitCode 非零,
+    # 走 WithRecovery 会触发不必要的 Reset(60s 浪费);daemon 卡死时超时,后续挂载会兜底自愈
+    $r = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'cloud-init', 'status', '--wait') -TimeoutSec 300
+    if ($r.TimedOut) {
+        Write-Warn "cloud-init status --wait 超时(5 分钟),VM 可能已就绪,继续后续步骤验证"
+    } elseif ($r.ExitCode -ne 0) {
+        Write-Warn "cloud-init status --wait 返回非零(常见:schema validation 警告 / 已 done 后再查的 transient 状态),继续"
     }
 
     # 挂载 .claude(RO)
     Write-Step "挂载宿主机 ~/.claude → VM $mountClaudeHost..."
     $hostClaude = Join-Path $env:USERPROFILE ".claude"
     if (-not (Test-Path $hostClaude)) { throw "$hostClaude 不存在,Claude Code 没装?" }
-    & multipass mount $hostClaude "${vmName}:${mountClaudeHost}" 2>$null
-    if ($LASTEXITCODE -eq 0) {
-        Write-Ok "挂载完成"
-    } else {
-        Write-Warn "mount 失败(可能已挂载,继续)"
-    }
+    $null = Try-Mount -MountArgs @('mount', $hostClaude, "${vmName}:${mountClaudeHost}") `
+                      -Description "挂载 .claude" `
+                      -FailureHint "(cc-switch env 同步会失效,继续)"
 
     # 挂载 workspace
     Write-Step "挂载 workspace → VM $mountWorkspace..."
@@ -210,14 +461,11 @@ function Start-ClaudeDev {
             Write-Warn "workspace/ 不存在,已新建空目录"
         }
     }
-    # 换源时清掉 VM 内 ~/workspace 旧挂载,避免"目标已被占用"冲突(首次挂载时 umount 会失败,忽略)
-    & multipass umount "${vmName}:${mountWorkspace}" 2>$null
-    & multipass mount $wsHost "${vmName}:${mountWorkspace}" 2>$null
-    if ($LASTEXITCODE -eq 0) {
-        Write-Ok "挂载完成"
-    } else {
-        Write-Warn "mount 失败(可能已挂载,继续)。中文路径($wsHost)若挂不上,见 README 的故障排查"
-    }
+    # 换源时清掉 VM 内 ~/workspace 旧挂载,避免"目标已被占用"冲突(首次 umount 失败忽略)
+    $null = Invoke-Multipass -ArgumentList @('umount', "${vmName}:${mountWorkspace}") -TimeoutSec 30
+    $null = Try-Mount -MountArgs @('mount', $wsHost, "${vmName}:${mountWorkspace}") `
+                      -Description "挂载 workspace" `
+                      -FailureHint "(中文路径 $wsHost 若挂不上,见 README 故障排查;继续)"
 
     # SSH 反向隧道
     Write-Step "启动 SSH 反向隧道(宿主机 $ccSwitchPort ↔ VM 127.0.0.1:$ccSwitchPort)..."
@@ -246,7 +494,7 @@ function Start-ClaudeDev {
     Write-Host ""
     Write-Host "==== 完成 ====" -ForegroundColor Green
     Write-Host "进入 VM:    multipass shell $vmName"
-    Write-Host "VM 里跑:    claude --dangerously-skip-permissions"
+    Write-Host "VM 里跑:    claude --allow-dangerously-skip-permissions"
     Write-Host "状态:       .\launch.ps1 status"
     Write-Host "停机:       .\launch.ps1 stop"
     Write-Host ""
@@ -257,21 +505,26 @@ function Stop-ClaudeDev {
     Write-Step "停隧道..."
     Stop-Tunnel
     Write-Step "停 VM..."
-    if (Test-VmExists) {
-        multipass stop $vmName
-        Write-Ok "VM 已停"
-    } else {
-        Write-Warn "VM 不存在,跳过"
+    switch (Test-VmExists) {
+        'exists'  {
+            multipass stop $vmName
+            Write-Ok "VM 已停"
+        }
+        'absent'  { Write-Warn "VM 不存在,跳过" }
+        'unknown' { Write-Warn "VM 状态不确定(daemon 异常),不停 VM 避免误伤" }
     }
 }
 
 # ====== status ======
 function Show-Status {
     Write-Step "VM 状态"
-    if (Test-VmExists) {
-        multipass info $vmName
-    } else {
-        Write-Warn "VM 不存在"
+    switch (Test-VmExists) {
+        'exists'  { multipass info $vmName }
+        'absent'  { Write-Warn "VM 不存在" }
+        'unknown' {
+            Write-Warn "VM 状态不确定(daemon 抽风,VM 本身可能正常)"
+            Write-Warn "稍等 1-2 分钟重跑;或直接 'multipass shell $vmName' 验证 VM 是否可用"
+        }
     }
 
     Write-Step "SSH 反向隧道"
@@ -304,11 +557,13 @@ function Delete-ClaudeDev {
     Write-Step "清理隧道..."
     Stop-Tunnel
     Write-Step "删 VM..."
-    if (Test-VmExists) {
-        multipass delete --purge $vmName
-        Write-Ok "VM 已删除并清理"
-    } else {
-        Write-Warn "VM 不存在,跳过"
+    switch (Test-VmExists) {
+        'exists'  {
+            multipass delete --purge $vmName
+            Write-Ok "VM 已删除并清理"
+        }
+        'absent'  { Write-Warn "VM 不存在,跳过" }
+        'unknown' { Write-Warn "VM 状态不确定(daemon 异常),不删 VM 避免误操作" }
     }
     Write-Host ""
     Write-Host "保留: workspace/、.ssh-key、.ssh-key.pub(下次 start 复用)" -ForegroundColor Green
