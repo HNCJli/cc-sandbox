@@ -40,28 +40,21 @@ multipass find                        # 应能列出 26.04 / resolute 别名
 
 ## §B launch.ps1 判定失败但 VM 其实已创建成功
 
-**现象**:`.\launch.ps1 start` 抛
-```
-multipass launch 失败
-At ...launch.ps1:168 char:36 + if ($LASTEXITCODE -ne 0) { throw ...
-```
-但 `multipass list` 显示 `claude-dev  Running`。
+**现象**:`.\launch.ps1 start` 抛 launch 失败错误,但 `multipass list` 显示 `claude-dev  Running`。
 
-**根因**:`multipass launch` 打进度条时,PowerShell 5.1 会把它的 `$LASTEXITCODE` 误判为非零,脚本 `throw` 提前中断——**VM 实际创建成功了**,只是后续的挂载 + SSH 隧道没执行。
+**根因**:PowerShell 5.1 偶发把 `multipass launch` 打进度条的过程的退出码误判为非零,脚本提前 `throw` —— **VM 实际创建成功了**,只是后续的挂载 + SSH 隧道没执行。新版 launch.ps1 已加 `--timeout` 和 cloud-init 旁路探测兜底,这种情况极少出现,但 PS 5.1 极端环境下仍可能撞上。
 
 **修复**:不用 delete 重来。直接**再跑一次**:
 ```powershell
 .\launch.ps1 start
 ```
-脚本检测到 VM 已 `Running` 会跳过 launch,只补挂载 + 起隧道(见 launch.ps1 的 `Start-ClaudeDev`:`if ($state -eq "Running") { 只重挂/重起隧道 }`)。
+脚本检测到 VM 已 `Running` 会跳过 launch,只补挂载 + 起隧道。
 
 先确认 VM 和工具装好了:
 ```powershell
 multipass list
 multipass exec claude-dev -- bash -lc "node -v; which claude"
 ```
-
-> 潜在根治(可选,改 launch.ps1):首次 launch 后不靠 `$LASTEXITCODE`,改用 `Test-VmExists` / `Get-VmState -eq 'Running'` 判断成功。当前 skill 不改脚本,靠"再跑一次"绕过。
 
 ---
 

@@ -83,7 +83,7 @@ netstat -ano | findstr 15721
 ```
 应看到 `TCP 127.0.0.1:15721 ... LISTENING`。
 
-> cc-switch 端口若不是默认的 15721,改 `launch.ps1` 顶部 `$ccSwitchPort` 一处即可。
+> cc-switch 端口若不是默认的 15721,跑 `start` 时带 `-CcSwitchPort <端口>` 即可。
 
 ## 常用操作
 
@@ -129,6 +129,22 @@ tmux new -s work                        # tmux 会话
 .\launch.ps1 delete      # 删 VM + 清理隧道(workspace/ 和 .ssh-key 保留)
 ```
 
+### 宿主机重启后
+
+直接 `.\launch.ps1 start`。脚本会自动清理上次留下的死隧道进程(`.tunnel.pid` 里写的 PID 在重启后已失效),重起一条新的。VM 自己会被 Multipass 唤醒。
+
+唯一注意:cc-switch 不一定开机自启,如果 `start` 时它没跑,VM 里 Claude Code 会连不上 LLM —— 手动开一下 cc-switch 即可。
+
+### 临时换配置
+
+CPU / 内存 / 磁盘 / 镜像版本都参数化了,不用改源码:
+
+```powershell
+.\launch.ps1 start -MemoryGB 8 -Cpus 4                # 临时给大点
+.\launch.ps1 start -Image noble                        # 临时回退 Ubuntu 24.04 测试
+```
+(只有 `delete + start` 重建时这些参数才生效;已存在的 VM 改参数不会动)
+
 ## 配置管理
 
 ### 改 Claude 配置
@@ -151,7 +167,7 @@ VM 里 `~/.claude/settings.json` 是 `chmod 444`,**Claude Code 在 VM 里改不�
 
 ### 改 launch.ps1 默认参数
 
-编辑 `launch.ps1` 顶部「配置」段:CPU、内存、磁盘、cc-switch 端口等。
+CPU / 内存 / 磁盘 / 镜像 / cc-switch 端口都参数化了,见 `launch.ps1` 顶部 `param()` 块默认值。临时改用命令行参数(见上文"临时换配置"),想永久改默认值就编辑 `param()` 块。
 
 ## SSH 进 VM(IDE 集成 / 外部 SSH 客户端)
 
@@ -170,18 +186,13 @@ VM IP 在 stop/start 后可能变,需更新。持久的 `multipass shell` 不受
 
 ## 可选:VM 内装 Docker
 
-cloud-init 留了注释掉的 Docker 安装代码块。需要时编辑 `cloud-init.yaml`,取消 `runcmd` 末尾 3 行注释:
+VM 已经是 Ubuntu,直接 `apt install` 就行,不用重建:
 
-```yaml
-  - apt-get install -y docker.io
-  - usermod -aG docker ubuntu
-  - systemctl enable --now docker
-```
-
-然后:
-```powershell
-.\launch.ps1 delete
-.\launch.ps1 start
+```bash
+# 进 VM 后
+sudo apt-get update && sudo apt-get install -y docker.io
+sudo usermod -aG docker ubuntu     # 然后退出重进 shell 让组生效
+sudo systemctl enable --now docker
 ```
 
 ## tmux 快捷键
@@ -193,8 +204,6 @@ cloud-init 留了注释掉的 Docker 安装代码块。需要时编辑 `cloud-in
 | 重新连回 | `tmux a` 或 `tmux a -t <名字>` |
 | 列出会话 | `tmux ls`(没会话时报 `error connecting to ...` 是正常提示,不是 bug) |
 | 不依赖快捷键的退出 | 在 tmux 内的 shell 敲 `tmux detach-client` |
-
-> 若再遇到小写 `d` 不触发 detach(原作者容器时代曾遇到),在 `tmux.conf` 加一行 `bind d detach-client` 显式绑。
 
 ## 故障排查
 
@@ -263,10 +272,11 @@ multipass exec claude-dev -- sudo cat /var/log/cloud-init-output.log
 
 ## 备注
 
+- **单 VM 设计**:VM 名固定 `claude-dev`,workspace 默认独占 —— 不支持同时起多个 VM 共用同一个 workspace 目录(会两边互相覆盖)
 - VM 行为:`multipass stop` 后不会自动起,需手动 `.\launch.ps1 start`
 - VM 里改 `~/.claude/settings.json` 会被 chmod 444 挡住;真要改就改宿主机的
-- cc-switch 端口(默认 15721)若变了,改 `launch.ps1` 顶部 `$ccSwitchPort`(cloud-init.yaml 里只有注释,无需改)
-- 资源占用:默认 2 CPU / 4G 内存 / 20G 盘,内存吃紧时调 `launch.ps1` 的 `$memoryGB`
+- cc-switch 端口(默认 15721)若变了,用 `-CcSwitchPort` 参数或改 `launch.ps1` 的 `param()` 块默认值
+- 资源占用:默认 2 CPU / 4G 内存 / 20G 盘,内存吃紧时 `-MemoryGB 8` 临时调大
 
 ## License
 

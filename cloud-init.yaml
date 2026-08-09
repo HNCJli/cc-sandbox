@@ -35,6 +35,7 @@ write_files:
 
   # settings.json 同步: 宿主机挂载的 .claude-host → VM 实际 .claude/(VM 内只读)
   # 白名单过滤:只提取 LLM 相关 env,其余字段(statusLine/mcpServers/hooks/permissions 等)不进 VM,VM 用 Claude Code 默认
+  # 注:此文件不依赖 06-local-bin.sh 的 PATH(claude 是 npm 全局,不是 ~/.local/bin)
   - path: /etc/profile.d/05-claude-config.sh
     permissions: '0644'
     content: |
@@ -98,10 +99,6 @@ runcmd:
   - apt-get install -y nodejs
   # Claude Code
   - npm install -g @anthropic-ai/claude-code
-  # (可选 Docker — 需要时取消下面 3 行注释,然后 ./launch.ps1 delete && ./launch.ps1 start)
-  # - apt-get install -y docker.io
-  # - usermod -aG docker ubuntu
-  # - systemctl enable --now docker
   # cc-pocket daemon(手机遥控 Claude Code;自带 JRE,只需 curl+tar)
   # 装到 ~/.local/share/cc-pocket/versions/,软链到 ~/.local/bin/cc-pocket-daemon
   # 用 ubuntu 用户跑(不能 root)
@@ -115,5 +112,3 @@ runcmd:
         XDG_RUNTIME_DIR=/run/user/1000 \
         DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus \
         bash -c 'curl -fsSL https://raw.githubusercontent.com/heypandax/cc-pocket/main/scripts/install.sh | bash'
-
-final_message: "claude-dev cloud-init done after $UPTIME seconds"
