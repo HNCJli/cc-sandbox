@@ -191,7 +191,8 @@ function Try-Mount {
         [string]$FailureHint = ""
     )
     foreach ($attempt in 1..2) {
-        $r = Invoke-Multipass -ArgumentList $MountArgs -TimeoutSec 60
+        # 120s:慢网络 + cloud-init 在跑时,multipass 跟 VM 的 SSH 通道会慢;60s 实测不够
+        $r = Invoke-Multipass -ArgumentList $MountArgs -TimeoutSec 120
         if ($r.ExitCode -eq 0 -or $r.Stderr -match 'already mounted|already.*mount') {
             Write-Ok "$Description 完成"
             return $true
@@ -478,7 +479,8 @@ function Mount-ExtraMounts {
         $null = Invoke-Multipass -ArgumentList @('umount', "${vmName}:${target}") -TimeoutSec 30
 
         # 3) 挂载后再用 findmnt 验证一次 —— 这才是成功的唯一判据
-        $mt = Invoke-Multipass -ArgumentList @('mount', $src, "${vmName}:${target}") -TimeoutSec 60
+        # 120s:跟 Try-Mount 一致(VM 忙时 SSH 通道慢)
+        $mt = Invoke-Multipass -ArgumentList @('mount', $src, "${vmName}:${target}") -TimeoutSec 120
         $ok = (Test-VMTargetMounted -Target $target)
         if ($ok) {
             Write-Ok "挂载 $src → $target 完成"
@@ -564,9 +566,12 @@ function Start-ClaudeDev {
                 $needProbe = $true
             } elseif ($r.ExitCode -ne 0) {
                 $err = if ($r.Stderr) { $r.Stderr.Trim() } else { "(无 stderr)" }
-                # multipass 自己的 --timeout 触发:VM 可能其实好的,走旁路探测
-                # "timed out waiting for initialization" 是 multipass 1.16.x 的固定字面量
-                if ($err -match 'timed out waiting for initialization') {
+                # multipass 自己的 --timeout / SSH 等待超时触发:VM 可能其实好的,走旁路探测
+                # 字面量随版本/触发路径:
+                #   "timed out waiting for initialization"(老版本)
+                #   "Timed out waiting for instance launch"(1.16.x,实测遇到)
+                #   "Timed out waiting for SSH to be up"(SSH 路径)
+                if ($err -match '(?:[Tt]imed out waiting for (?:initialization|instance launch|SSH))') {
                     Write-Warn "multipass launch 自身超时触发,验证 VM 实际状态..."
                     $needProbe = $true
                 } else {
@@ -592,9 +597,11 @@ function Start-ClaudeDev {
     Write-Step "等 cloud-init 完成..."
     # 不走 WithRecovery:cloud-init 偶发 schema validation 警告会让 ExitCode 非零,
     # 走 WithRecovery 会触发不必要的 Reset(60s 浪费);daemon 卡死时超时,后续挂载会兜底自愈
-    $r = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'cloud-init', 'status', '--wait') -TimeoutSec 300
+    # 超时给 1200s(20 分钟),慢网络下 npm + cc-pocket JRE 下载可能 15+ 分钟;
+    # 之前 300s 太短,会错误前进到挂载,而 cloud-init 还在跑导致挂载/卸载连锁超时
+    $r = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'cloud-init', 'status', '--wait') -TimeoutSec 1200
     if ($r.TimedOut) {
-        Write-Warn "cloud-init status --wait 超时(5 分钟),VM 可能已就绪,继续后续步骤验证"
+        Write-Warn "cloud-init status --wait 超时(20 分钟),VM 可能已就绪,继续后续步骤验证"
     } elseif ($r.ExitCode -ne 0) {
         Write-Warn "cloud-init status --wait 返回非零(常见:schema validation 警告 / 已 done 后再查的 transient 状态),继续"
     }
@@ -612,7 +619,8 @@ function Start-ClaudeDev {
         # 多目录模式:不挂根 workspace,卸掉已有根挂载,~/workspace 保持 VM 本地目录
         # 避免嵌套挂载(Multipass 1.16 在 Windows 不支持)
         Write-Step "跳过根 workspace 挂载(-NoRootWorkspace),卸掉已有根挂载..."
-        $unmountRoot = Invoke-Multipass -ArgumentList @('umount', "${vmName}:${mountWorkspace}") -TimeoutSec 30
+        # 90s:慢网络 + cloud-init 在跑时 umount 也可能慢;30s 实测不够,会连锁 throw
+        $unmountRoot = Invoke-Multipass -ArgumentList @('umount', "${vmName}:${mountWorkspace}") -TimeoutSec 90
         if ($unmountRoot.TimedOut) {
             throw "根 workspace 卸载超时,停止启动以避免嵌套挂载"
         }
