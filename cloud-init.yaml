@@ -1,6 +1,6 @@
 #cloud-init
 # 由 launch.ps1 渲染后再喂给 multipass launch --cloud-init
-# 占位符在 write_files 段:TMUX_CONF_PLACEHOLDER 和 SSH_PUBKEY_PLACEHOLDER
+# 占位符(渲染时由 launch.ps1 替换):TMUX_CONF_PLACEHOLDER, SSH_PUBKEY_PLACEHOLDER, TAILSCALE_BLOCK
 # (注意:不要在注释里重复出现占位符字面量,会被 .Replace 误伤)
 
 hostname: claude-dev
@@ -112,3 +112,4 @@ runcmd:
         XDG_RUNTIME_DIR=/run/user/1000 \
         DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus \
         bash -c 'curl -fsSL https://raw.githubusercontent.com/heypandax/cc-pocket/main/scripts/install.sh | bash'
+{{TAILSCALE_BLOCK}}

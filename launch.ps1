@@ -23,7 +23,10 @@ param(
     [int]$Cpus         = 2,
     [int]$MemoryGB     = 4,
     [int]$DiskGB       = 20,
-    [int]$CcSwitchPort = 15721          # cc-switch 在宿主机监听的端口
+    [int]$CcSwitchPort = 15721,         # cc-switch 在宿主机监听的端口
+
+    # 预装 tailscale(家里跨网络用,配对后手机 4G 能通过 cc-pocket 遥控;公司场景别开,会被软件审计识别)
+    [switch]$EnableTailscale
 )
 
 # PS 5.1 把 native 命令的 stderr 当 terminating error,会让 multipass info(VM 不存在时)直接挂掉
@@ -289,6 +292,7 @@ function Get-VmIp { (Get-VmRecord).IPv4 }
 
 # ====== 渲染 cloud-init ======
 function Render-CloudInit {
+    param([switch]$EnableTailscale)
     Write-Step "渲染 cloud-init.yaml..."
 
     $templatePath = Join-Path $scriptDir "cloud-init.yaml"
@@ -312,6 +316,18 @@ function Render-CloudInit {
     $rendered = $template.Replace('{{TMUX_CONF_PLACEHOLDER}}', $tmuxIndented)
     # SSH_PUBKEY 现在在 runcmd 的 echo "..." 里,不需要缩进
     $rendered = $rendered.Replace('{{SSH_PUBKEY_PLACEHOLDER}}', $pubKey)
+
+    # tailscale 块:启用时插入安装命令(2 空格缩进对齐 runcmd 列表项),否则空字符串(留空行不影响 YAML 解析)
+    if ($EnableTailscale) {
+        $tailscaleBlock = @"
+  # tailscale(家里跨网络用;VM 拿 100.x.x.x tailnet IP,配对后手机 4G 能通过 cc-pocket 遥控)
+  # 注:仅安装未运行 'tailscale up' 时无出站流量,但软件审计能看到包已装
+  - curl -fsSL https://tailscale.com/install.sh | sh
+"@
+    } else {
+        $tailscaleBlock = ""
+    }
+    $rendered = $rendered.Replace('{{TAILSCALE_BLOCK}}', $tailscaleBlock)
 
     $renderedPath = Join-Path $scriptDir ".cloud-init.rendered.yaml"
     $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
@@ -350,7 +366,7 @@ function Start-ClaudeDev {
         Write-Ok ".ssh-key 生成"
     }
 
-    $renderedPath = Render-CloudInit
+    $renderedPath = Render-CloudInit -EnableTailscale:$EnableTailscale
 
     # 启动或唤醒 VM
     Write-Step "启动 VM(首次 3-5 分钟,cloud-init 装 Node + Claude Code)..."
@@ -484,6 +500,9 @@ function Start-ClaudeDev {
     Write-Host "==== 完成 ====" -ForegroundColor Green
     Write-Host "进入 VM:    multipass shell $vmName"
     Write-Host "VM 里跑:    claude --dangerously-skip-permissions"
+    if ($EnableTailscale) {
+        Write-Host "Tailscale:  VM 里跑 'sudo tailscale up' 配对(已预装,未配对)"
+    }
     Write-Host "状态:       .\launch.ps1 status"
     Write-Host "停机:       .\launch.ps1 stop"
     Write-Host ""

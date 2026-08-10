@@ -195,6 +195,31 @@ sudo usermod -aG docker ubuntu     # 然后退出重进 shell 让组生效
 sudo systemctl enable --now docker
 ```
 
+## 可选:跨网络访问 VM(Tailscale)
+
+家里跨网络(手机 4G、外面咖啡店)想直连 VM 时,加 `-EnableTailscale` 预装:
+
+```powershell
+.\launch.ps1 delete                # cloud-init 只在 launch 时跑,改预装必须重建 VM
+.\launch.ps1 start -EnableTailscale
+```
+
+VM 起来后,**进 VM 手动配对**(cloud-init 阶段没法弹浏览器):
+```bash
+sudo tailscale up              # 弹 URL,浏览器登录同一个 tailscale 账号
+tailscale ip                   # 看 VM 拿到的 100.x.x.x 内网 IP
+```
+
+手机/其他设备登同一个 tailscale 账号后,就能用那个 100.x.x.x IP SSH / 直连 VM 上任意服务。
+
+**⚠️ 公司场景千万别开**:
+- `-EnableTailscale` 会真的把 tailscale 包装进 VM
+- 即使不 `tailscale up` 没有出站流量,公司软件审计(SCCM 类)能扫到包已装
+- 公司禁远控/打洞软件时,这会被识别为违规
+- 公司场景用 `.\launch.ps1 start`(不带 `-EnableTailscale`),完全不碰
+
+**关于 cc-pocket(核心场景)**:宿主机实测过 —— 装 tailscale + 配对后,手机用 4G 流量能通过 cc-pocket 连到本机 Claude Code。VM 里同理:**装 `-EnableTailscale` + 配对后,手机跨网络也能用 cc-pocket 遥控 VM 里的 Claude Code**。这是本功能的主要动机,不是顺带的 SSH/直连能力。
+
 ## tmux 快捷键
 
 | 操作 | 快捷键 / 命令 |

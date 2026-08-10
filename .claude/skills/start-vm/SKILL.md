@@ -78,6 +78,8 @@ systemctl --user enable --now cc-pocket-daemon
 ```
 之后配对即可。配对一次后 daemon 由 systemd 用户服务托管,VM 重启自动起(linger 已开)。手机 App 从 [cc-pocket 项目](https://github.com/heypandax/cc-pocket) README 列出的商店下载。
 
+跨网络用 cc-pocket(手机 4G 遥控)?家里 VM 重建时加 `-EnableTailscale` 预装(`.\launch.ps1 start -EnableTailscale`),进 VM `sudo tailscale up` 配对后即可。见 README 的 Tailscale 章节。**公司场景别开**(会被软件审计识别)。
+
 ## 常用子命令
 
 ```powershell
