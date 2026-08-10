@@ -21,17 +21,26 @@ ssh -V                      # OpenSSH 客户端
 netstat -ano | findstr 15721   # cc-switch 应 LISTENING 在 127.0.0.1:15721
 ```
 
-三者缺一见 README「前置」。cc-switch 端口若非 15721,改 `launch.ps1` 顶部 `$ccSwitchPort`。
+三者缺一见 README「前置」。cc-switch 端口若非 15721,跑 `start` 时带 `-CcSwitchPort <端口>`。
 
-### 2. 启动
+### 2. 启动(选一种挂载模式)
 
-在项目根目录跑:
+**传统单根模式**(默认,简单):项目下 `./workspace/` 挂为 VM 根 `~/workspace`。
 
 ```powershell
 .\launch.ps1 start
 ```
 
-首次 3–5 分钟(下载 Ubuntu 镜像 + cloud-init 装 Node 20 + Claude Code)。脚本会自动:开 privileged-mounts → 创建/唤醒 VM → 挂 `~/.claude`(RO)和 `workspace/` → 起 SSH 反向隧道。
+**多目录模式**(挂多个宿主目录到 `~/workspace/<子目录>`):先复制 `mounts.example.txt` 为本地 `mounts.txt` 填好路径,或直接传 `-ExtraMounts`。
+
+```powershell
+.\launch.ps1 start -NoRootWorkspace                     # 读本地 mounts.txt
+.\launch.ps1 start -NoRootWorkspace -ExtraMounts "D:\repo1","E:\repo2=alias2"
+```
+
+两种模式不可混用;`-WorkspaceHost` 只在传统模式下用。多目录模式必须 `-NoRootWorkspace`(Multipass 1.16 在 Windows 不支持嵌套挂载)。
+
+首次 3–5 分钟(下载 Ubuntu 镜像 + cloud-init 装 Node 20 + Claude Code + Fish/fzf/zoxide)。脚本会自动:开 privileged-mounts → 创建/唤醒 VM → 挂 `~/.claude`(RO)和 workspace → 起 SSH 反向隧道。
 
 > **后台跑法**:首次因为要下载镜像,建议后台运行 + 轮询输出文件看进度,别干等。
 
@@ -43,24 +52,34 @@ netstat -ano | findstr 15721   # cc-switch 应 LISTENING 在 127.0.0.1:15721
 
 要看到三项都 OK:VM `Running`、隧道 `在跑`、`VM 里 curl 127.0.0.1:15721 返回 HTTP 4xx(隧道通了)`。
 
-再确认 VM 里 env 同步到位(**这步最容易被权限问题坑,务必查**):
+再确认 VM 里 env 同步到位(**这步最容易被权限问题坑,务必查**;**不要 `cat` settings.json,里面有 token**):
 
 ```powershell
-multipass exec claude-dev -- bash -lc "cat ~/.claude/settings.json"
+multipass exec claude-dev -- bash -lc "jq -e '.env | type == \"object\" and length > 0' ~/.claude/settings.json >/dev/null && echo OK || echo EMPTY"
 ```
 
-应输出**非空** `{"env":{"ANTHROPIC_AUTH_TOKEN":...,"ANTHROPIC_BASE_URL":...}}`。
-若是 `{"env":{}}` → env 没同步进来 → 见 [排障 §C](./references/troubleshooting.md)。
+输出 `OK` = 同步到位;`EMPTY` → env 没同步进来 → 见 [排障 §C](./references/troubleshooting.md)。
+
+最后确认 workspace 挂载真到位(**不要只看 launch 输出,以 VM 内 findmnt 为准**):
+
+```powershell
+multipass exec claude-dev -- bash -lc "findmnt | grep /home/ubuntu/workspace"
+multipass exec claude-dev -- bash -lc "ls -la ~/workspace"
+```
+
+传统单根模式应看到根 `/home/ubuntu/workspace` 一行 mount;多目录模式应看到各子目录的 mount 记录。
 
 ### 4. 用起来
 
 ```powershell
 multipass shell claude-dev
-# VM 内:
+# VM 内(Fish 交互 shell):
 claude --dangerously-skip-permissions
 ```
 
-每次敲 `claude` 前 profile 脚本会自动重新同步 env,宿主机 cc-switch 切 provider 后 VM 会跟上。
+进 VM 是 fish 提示符:灰色历史建议(`→` 或 `Ctrl+F` 接受)、`Ctrl+R` 模糊搜历史、`z <关键词>` 跳目录(zoxide)。临时要 bash 敲 `bash`。
+
+每次敲 `claude` 前(fish 和 bash 都一样)profile 脚本会自动重新同步 env,宿主机 cc-switch 切 provider 后 VM 会跟上。
 
 ### cc-pocket(可选,手机遥控)
 
@@ -95,11 +114,12 @@ systemctl --user enable --now cc-pocket-daemon
 
 | 现象 | 分支 |
 |---|---|
+| `multipass list` 卡住/超时,或 `launch.ps1` 报 `daemon 自动重置失败`,或 launch 卡在 SSH | §F Multipass Windows 服务/后端卡死;先恢复控制面,勿立刻 delete |
 | `launch failed: Remote "" is unknown or unreachable` | §A 镜像源被改成了非官方源 |
-| `multipass launch 失败` 但 `multipass list` 显示 VM 已 Running | §B launch.ps1 的 $LASTEXITCODE 误判 |
-| VM 里 `settings.json` 是 `{"env":{}}`,或 `claude` 弹登录菜单 | §C 宿主机 .claude 权限锁死,env 同步为空 |
+| `cloud-init status --wait` 超时/返回非零 | §B launch 后 cloud-init 探测 |
+| VM 里 env 检查是 `EMPTY`,或 `claude` 弹登录菜单 | §C 宿主机 .claude 权限锁死,env 同步为空 |
 | `bash: *** fatal error - add_item ... errno 1` | §D Git Bash spawn bug(与 VM 无关) |
-| SSH 隧道秒退 / cc-switch 端口探测 000 | §E 隧道 |
+| SSH 隧道秒退 / cc-switch 端口探测 000 | §E 隧道;ExitCode 255 + `UNPROTECTED PRIVATE KEY FILE` 见 §E.1 |
 | 挂载失败 / 非 ASCII 路径 | 见项目 README「挂载失败」 |
 
 **注意**:§A(镜像源)和 §C(权限)这两类问题**不是每台机器都有**——只在遇到对应报错时才处理,别在正常机器上预防性乱改全局设置或文件权限。

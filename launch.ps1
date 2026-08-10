@@ -15,6 +15,7 @@ param(
     [string]$Action = "start",
 
     # 宿主机要挂进 VM ~/workspace 的目录;空 = 用项目下 ./workspace(默认,向后兼容)
+    # 仅用于传统单根模式(无 -NoRootWorkspace)
     [Parameter()]
     [string]$WorkspaceHost = "",
 
@@ -26,7 +27,18 @@ param(
     [int]$CcSwitchPort = 15721,         # cc-switch 在宿主机监听的端口
 
     # 预装 tailscale(家里跨网络用,配对后手机 4G 能通过 cc-pocket 遥控;公司场景别开,会被软件审计识别)
-    [switch]$EnableTailscale
+    [switch]$EnableTailscale,
+
+    # 额外挂载列表,每项 "HostPath" 或 "HostPath=vmSubdir",挂到 ~/workspace/<vmSubdir>
+    # 简写时子目录名取宿主目录最后一级。传了此参数则不读 mounts.txt(参数优先)
+    # 必须配合 -NoRootWorkspace 使用(避开 Multipass 1.16 嵌套挂载 bug)
+    [Parameter()]
+    [string[]]$ExtraMounts = @(),
+
+    # 跳过根 workspace 挂载(并卸掉已有根挂载)。开了它,~/workspace 就是 VM 本地目录,
+    # ExtraMounts 的子目录挂载便不再"嵌套在另一个挂载里",可避开 multipass 嵌套挂载失效的 bug
+    [Parameter()]
+    [switch]$NoRootWorkspace
 )
 
 # PS 5.1 把 native 命令的 stderr 当 terminating error,会让 multipass info(VM 不存在时)直接挂掉
@@ -348,9 +360,155 @@ function Stop-Tunnel {
     Remove-Item $pidFile -Force -ErrorAction SilentlyContinue
 }
 
+# ====== ExtraMounts 辅助:findmnt 验证挂载点真挂上了 ======
+# multipass mount 输出不可靠(already mounted 误报等),用 VM 内 findmnt 才是真相
+function Test-VMTargetMounted {
+    param([Parameter(Mandatory)] [string]$Target)
+    $r = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'findmnt', '-n', $Target) -TimeoutSec 15
+    return $r.ExitCode -eq 0 -and $r.Stdout -match [regex]::Escape($Target)
+}
+
+# ====== ExtraMounts:来源(参数优先,否则读 mounts.txt) ======
+# 返回 string[];无参数且配置文件不存在/为空 → 返回空数组(调用方跳过)
+function Get-ExtraMountsSource {
+    if ($ExtraMounts -and $ExtraMounts.Count -gt 0) { return @($ExtraMounts) }
+    $cfg = Join-Path $scriptDir "mounts.txt"
+    if (-not (Test-Path $cfg)) { return @() }
+    if (-not (Test-Path $cfg -PathType Leaf)) { throw "mounts.txt 不是普通文件: $cfg" }
+    try {
+        $lines = Get-Content $cfg -Encoding UTF8 -ErrorAction Stop | ForEach-Object { $_.Trim() } |
+                 Where-Object { $_ -ne "" -and -not $_.StartsWith("#") }
+    } catch {
+        throw "无法读取 mounts.txt: $($_.Exception.Message)"
+    }
+    return @($lines)
+}
+
+# ====== ExtraMounts:解析 + 校验 ======
+# 输入:[string[]] 每项 "HostPath" 或 "HostPath=vmSubdir"
+# 输出:hashtable 数组,每项 @{ HostPath=<绝对路径>; VmSubdir=<相对路径>; Target=<VM 内绝对路径> }
+# 解析/校验失败直接 throw(参数错误 fail fast)
+function Resolve-ExtraMounts {
+    param([Parameter(Mandatory)] [string[]]$Items)
+
+    $result = @()
+    $seenSubdirs = @{}
+    foreach ($item in $Items) {
+        if ([string]::IsNullOrWhiteSpace($item)) {
+            throw "-ExtraMounts 含空项。每项格式: HostPath 或 HostPath=vmSubdir"
+        }
+
+        # 按第一个 '=' 切;无 '=' 时整项为 HostPath,子目录名取宿主目录最后一级
+        $idx = $item.IndexOf('=')
+        if ($idx -ge 0) {
+            $hostRaw  = $item.Substring(0, $idx).Trim()
+            $vmSubdir = $item.Substring($idx + 1).Trim()
+        } else {
+            $hostRaw  = $item.Trim()
+            $vmSubdir = ""
+        }
+        if ([string]::IsNullOrWhiteSpace($hostRaw)) {
+            throw "-ExtraMounts 项 '$item' 宿主机路径为空。格式: HostPath 或 HostPath=vmSubdir"
+        }
+
+        # 校验宿主源目录必须存在(先校验,简写取目录名也依赖它)
+        if (-not (Test-Path $hostRaw -PathType Container)) {
+            throw "-ExtraMounts 项 '$item' 的宿主机目录不存在或不是目录: $hostRaw"
+        }
+        $hostPath = (Resolve-Path $hostRaw).Path
+
+        # 简写:子目录名 = 宿主目录最后一级名(先去尾部 \ /)
+        if ($vmSubdir -eq "") {
+            $vmSubdir = Split-Path -Leaf ($hostPath.TrimEnd('\', '/'))
+        }
+
+        # 校验 vmSubdir(必须是 workspace 下的相对路径,禁逃逸)
+        $vmSubdir = $vmSubdir.Replace([char]92, [char]47)
+        $vmSubdir = $vmSubdir.Trim('/')
+        if ([string]::IsNullOrWhiteSpace($vmSubdir) -or $vmSubdir -eq '.') {
+            throw "-ExtraMounts 项 '$item' 的 vmSubdir 不能为空或 '.'(不能覆盖 workspace 根目录)"
+        }
+        $segments = $vmSubdir -split '/'
+        if ($segments -contains '.') {
+            throw "-ExtraMounts 项 '$item' 的 vmSubdir 不允许含 '.'(必须是 workspace 下的真实子目录): $vmSubdir"
+        }
+        if ($vmSubdir -match '(^|/)\.\.(/|$)') {
+            throw "-ExtraMounts 项 '$item' 的 vmSubdir 不允许含 '..'(防逃逸出 workspace): $vmSubdir"
+        }
+
+        # 子目录名冲突(两项映射到同一子目录)
+        if ($seenSubdirs.ContainsKey($vmSubdir)) {
+            throw "-ExtraMounts 子目录名重复: '$vmSubdir' 同时被 '$($seenSubdirs[$vmSubdir])' 和 '$hostPath' 使用"
+        }
+        $seenSubdirs[$vmSubdir] = $hostPath
+
+        $result += @{
+            HostPath = $hostPath
+            VmSubdir = $vmSubdir
+            Target   = "$mountWorkspace/$vmSubdir"
+        }
+    }
+    return $result
+}
+
+# ====== ExtraMounts:实际挂载 ======
+# 仅在 ~/workspace 是 VM 本地目录时调用(即 -NoRootWorkspace),避免嵌套挂载
+function Mount-ExtraMounts {
+    param([Parameter(Mandatory)] [array]$Mounts)
+
+    if ($Mounts.Count -eq 0) { return $true }
+
+    $allMounted = $true
+    Write-Step "挂载额外目录($($Mounts.Count) 个)到 $mountWorkspace 子目录..."
+    foreach ($m in $Mounts) {
+        $target = $m.Target     # VM 内绝对路径,如 /home/ubuntu/workspace/repo1
+        $src    = $m.HostPath
+
+        # 1) VM 内先 mkdir -p,否则 multipass mount 目标不存在会失败
+        $mk = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'mkdir', '-p', $target) -TimeoutSec 30
+        if ($mk.TimedOut -or $mk.ExitCode -ne 0) {
+            $err = if ($mk.TimedOut) { "超时" } elseif ($mk.Stderr) { $mk.Stderr.Trim() } else { "(无 stderr)" }
+            Write-Warn "mkdir -p $target 失败:$err(跳过 $src)"
+            $allMounted = $false
+            continue
+        }
+
+        # 2) 每次先卸载目标的旧映射再重挂:findmnt 只能证明目标被挂载,不能证明
+        #    它仍对应当前 mounts.txt/-ExtraMounts 声明的宿主源目录
+        $null = Invoke-Multipass -ArgumentList @('umount', "${vmName}:${target}") -TimeoutSec 30
+
+        # 3) 挂载后再用 findmnt 验证一次 —— 这才是成功的唯一判据
+        $mt = Invoke-Multipass -ArgumentList @('mount', $src, "${vmName}:${target}") -TimeoutSec 60
+        $ok = (Test-VMTargetMounted -Target $target)
+        if ($ok) {
+            Write-Ok "挂载 $src → $target 完成"
+        } else {
+            $err = if ($mt.Stderr) { $mt.Stderr.Trim() } else { "(无 stderr)" }
+            if ($err -match 'already mounted') {
+                Write-Warn "挂载 $src → $target 失败:multipass 记录卡死(already mounted 但实际未挂载)"
+                Write-Warn "  重新运行 .\launch.ps1 start -NoRootWorkspace 会再次尝试清理并挂载;若仍不行,先检查 daemon 状态再决定是否重建 VM"
+            } else {
+                Write-Warn "挂载 $src → $target 失败:$err"
+            }
+            $allMounted = $false
+        }
+    }
+    return $allMounted
+}
+
 # ====== start ======
 function Start-ClaudeDev {
     Assert-Prerequisites
+
+    # 多目录挂载参数校验 + 解析(在动 VM 前先 fail fast,避免无效参数触发 daemon 重启等副作用)
+    $extraItems = Get-ExtraMountsSource
+    if ($NoRootWorkspace -and $WorkspaceHost) {
+        throw "-NoRootWorkspace 与 -WorkspaceHost 不能同时使用。前者用 -ExtraMounts/mounts.txt 挂子目录,后者只用于传统单根 workspace 挂载"
+    }
+    if (-not $NoRootWorkspace -and $extraItems.Count -gt 0) {
+        throw "检测到 mounts.txt 或 -ExtraMounts,但普通 start 会产生嵌套挂载。请加 -NoRootWorkspace,或移除额外挂载后再用普通 start"
+    }
+    $resolvedExtraMounts = if ($extraItems.Count -gt 0) { Resolve-ExtraMounts -Items $extraItems } else { @() }
 
     # 隧道复用/清理:start 幂等可反复跑。停旧隧道(后面会重起)
     Stop-Tunnel
@@ -449,28 +607,53 @@ function Start-ClaudeDev {
                       -Description "挂载 .claude" `
                       -FailureHint "(cc-switch env 同步会失效,继续)"
 
-    # 挂载 workspace
-    Write-Step "挂载 workspace → VM $mountWorkspace..."
-    if ($WorkspaceHost) {
-        # 用户显式指定宿主机 workspace 目录:必须已存在,不自动创建
-        if (-not (Test-Path $WorkspaceHost -PathType Container)) {
-            throw "-WorkspaceHost 必须是已存在的目录: $WorkspaceHost"
+    # 挂载 workspace —— 两种模式互斥
+    if ($NoRootWorkspace) {
+        # 多目录模式:不挂根 workspace,卸掉已有根挂载,~/workspace 保持 VM 本地目录
+        # 避免嵌套挂载(Multipass 1.16 在 Windows 不支持)
+        Write-Step "跳过根 workspace 挂载(-NoRootWorkspace),卸掉已有根挂载..."
+        $unmountRoot = Invoke-Multipass -ArgumentList @('umount', "${vmName}:${mountWorkspace}") -TimeoutSec 30
+        if ($unmountRoot.TimedOut) {
+            throw "根 workspace 卸载超时,停止启动以避免嵌套挂载"
         }
-        $wsHost = (Resolve-Path $WorkspaceHost).Path
-        Write-Step "使用自定义 workspace 源: $wsHost"
+        $mkRoot = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'mkdir', '-p', $mountWorkspace) -TimeoutSec 30
+        if ($mkRoot.ExitCode -ne 0 -or $mkRoot.TimedOut) {
+            throw "无法创建 VM 本地 workspace 根目录,停止启动"
+        }
+        if (Test-VMTargetMounted -Target $mountWorkspace) {
+            throw "根 workspace 仍是宿主机挂载,停止启动以避免嵌套挂载。请检查 Multipass 挂载状态后重试"
+        }
+        Write-Ok "$mountWorkspace 保持 VM 本地(为 ExtraMounts 子目录挂载做准备)"
     } else {
-        # 默认:项目下 ./workspace(保持原行为)
-        $wsHost = Join-Path $scriptDir "workspace"
-        if (-not (Test-Path $wsHost)) {
-            New-Item -ItemType Directory -Path $wsHost | Out-Null
-            Write-Warn "workspace/ 不存在,已新建空目录"
+        Write-Step "挂载 workspace → VM $mountWorkspace..."
+        if ($WorkspaceHost) {
+            # 用户显式指定宿主机 workspace 目录:必须已存在,不自动创建
+            if (-not (Test-Path $WorkspaceHost -PathType Container)) {
+                throw "-WorkspaceHost 必须是已存在的目录: $WorkspaceHost"
+            }
+            $wsHost = (Resolve-Path $WorkspaceHost).Path
+            Write-Step "使用自定义 workspace 源: $wsHost"
+        } else {
+            # 默认:项目下 ./workspace(保持原行为)
+            $wsHost = Join-Path $scriptDir "workspace"
+            if (-not (Test-Path $wsHost)) {
+                New-Item -ItemType Directory -Path $wsHost | Out-Null
+                Write-Warn "workspace/ 不存在,已新建空目录"
+            }
+        }
+        # 换源时清掉 VM 内 ~/workspace 旧挂载,避免"目标已被占用"冲突(首次 umount 失败忽略)
+        $null = Invoke-Multipass -ArgumentList @('umount', "${vmName}:${mountWorkspace}") -TimeoutSec 30
+        $null = Try-Mount -MountArgs @('mount', $wsHost, "${vmName}:${mountWorkspace}") `
+                          -Description "挂载 workspace" `
+                          -FailureHint "(中文路径 $wsHost 若挂不上,见 README 故障排查;继续)"
+    }
+
+    # ExtraMounts:仅在 -NoRootWorkspace 下挂到 VM 本地 workspace 子目录
+    if ($resolvedExtraMounts.Count -gt 0) {
+        if (-not (Mount-ExtraMounts -Mounts $resolvedExtraMounts)) {
+            throw "一个或多个额外挂载失败,停止启动以避免 workspace 数据位置不确定"
         }
     }
-    # 换源时清掉 VM 内 ~/workspace 旧挂载,避免"目标已被占用"冲突(首次 umount 失败忽略)
-    $null = Invoke-Multipass -ArgumentList @('umount', "${vmName}:${mountWorkspace}") -TimeoutSec 30
-    $null = Try-Mount -MountArgs @('mount', $wsHost, "${vmName}:${mountWorkspace}") `
-                      -Description "挂载 workspace" `
-                      -FailureHint "(中文路径 $wsHost 若挂不上,见 README 故障排查;继续)"
 
     # SSH 反向隧道
     Write-Step "启动 SSH 反向隧道(宿主机 $ccSwitchPort ↔ VM 127.0.0.1:$ccSwitchPort)..."

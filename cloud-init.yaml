@@ -18,6 +18,9 @@ packages:
   - ripgrep
   - fd-find
   - tmux
+  - fish
+  - fzf
+  - zoxide
   - openssh-server
   - sudo
   - locales
@@ -76,6 +79,32 @@ write_files:
         *) export PATH="$HOME/.local/bin:$PATH" ;;
       esac
 
+  # Fish 交互体验:灰色历史建议(右方向键/Ctrl+F 接受);启动 Claude 前同步 cc-switch env
+  # 跟 bash wrapper(05-claude-config.sh)共用同一份逻辑:读 .claude-host → jq 过滤 env → 写 ~/.claude/settings.json 444
+  - path: /home/ubuntu/.config/fish/config.fish
+    defer: true
+    permissions: '0644'
+    owner: ubuntu:ubuntu
+    content: |
+      fish_add_path $HOME/.local/bin
+      zoxide init fish | source
+      function sync_claude_config
+          if not test -f "$HOME/.claude-host/settings.json"
+              return 0
+          end
+          mkdir -p "$HOME/.claude"
+          if not jq '{env: (.env // {})}' "$HOME/.claude-host/settings.json" > "$HOME/.claude/settings.json.tmp" 2>/dev/null
+              echo '{"env":{}}' > "$HOME/.claude/settings.json.tmp"
+          end
+          rm -f "$HOME/.claude/settings.json"
+          mv "$HOME/.claude/settings.json.tmp" "$HOME/.claude/settings.json"
+          chmod 444 "$HOME/.claude/settings.json"
+      end
+      function claude
+          sync_claude_config
+          command claude $argv
+      end
+
   # tmux 配置(launch.ps1 把 tmux.conf 内容渲染进来)
   # defer: true —— 等默认 ubuntu 用户创建后再写,避免 owner 失败
   # 注意:占位符必须顶格(0 缩进),由 launch.ps1 给每行加 6 空格缩进
@@ -99,17 +128,28 @@ runcmd:
   - apt-get install -y nodejs
   # Claude Code
   - npm install -g @anthropic-ai/claude-code
+  # Fish 作 ubuntu 的交互 shell;.sh 脚本和 cloud-init 仍走 Bash
+  - chsh -s /usr/bin/fish ubuntu
   # cc-pocket daemon(手机遥控 Claude Code;自带 JRE,只需 curl+tar)
   # 装到 ~/.local/share/cc-pocket/versions/,软链到 ~/.local/bin/cc-pocket-daemon
   # 用 ubuntu 用户跑(不能 root)
   # 关键:必须先起 user@1000 + 显式给 XDG_RUNTIME_DIR,cloud-init 上下文没 D-Bus user session,
   # install.sh 里 systemctl --user show-environment 失败会跳过 service-install,daemon 不会自起
-  - loginctl enable-linger ubuntu
+  # 容错:任一步失败只警告,不阻断核心 VM(Node + Claude Code 已装好)
   - |
-    systemctl start user@1000.service
-    for i in $(seq 1 20); do [ -S /run/user/1000/bus ] && break; sleep 0.5; done
-    sudo -u ubuntu \
-        XDG_RUNTIME_DIR=/run/user/1000 \
-        DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus \
-        bash -c 'curl -fsSL https://raw.githubusercontent.com/heypandax/cc-pocket/main/scripts/install.sh | bash'
+    if ! loginctl enable-linger ubuntu; then
+      echo '警告:无法为 cc-pocket 启用 linger，跳过可选组件' >&2
+    elif ! systemctl start user@1000.service; then
+      echo '警告:无法启动 cc-pocket user service，跳过可选组件' >&2
+    else
+      for i in $(seq 1 20); do [ -S /run/user/1000/bus ] && break; sleep 0.5; done
+      if [ ! -S /run/user/1000/bus ]; then
+        echo '警告:cc-pocket D-Bus user session 未就绪，跳过可选组件' >&2
+      elif ! sudo -u ubuntu \
+          XDG_RUNTIME_DIR=/run/user/1000 \
+          DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus \
+          bash -c 'set -o pipefail; curl -fsSL https://raw.githubusercontent.com/heypandax/cc-pocket/main/scripts/install.sh | bash'; then
+        echo '警告:cc-pocket 安装失败，Claude Code 核心环境仍可使用' >&2
+      fi
+    fi
 {{TAILSCALE_BLOCK}}

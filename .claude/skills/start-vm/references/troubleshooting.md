@@ -38,22 +38,32 @@ multipass find                        # 应能列出 26.04 / resolute 别名
 
 ---
 
-## §B launch.ps1 判定失败但 VM 其实已创建成功
+## §B launch 后 cloud-init 探测
 
-**现象**:`.\launch.ps1 start` 抛 launch 失败错误,但 `multipass list` 显示 `claude-dev  Running`。
-
-**根因**:PowerShell 5.1 偶发把 `multipass launch` 打进度条的过程的退出码误判为非零,脚本提前 `throw` —— **VM 实际创建成功了**,只是后续的挂载 + SSH 隧道没执行。新版 launch.ps1 已加 `--timeout` 和 cloud-init 旁路探测兜底,这种情况极少出现,但 PS 5.1 极端环境下仍可能撞上。
-
-**修复**:不用 delete 重来。直接**再跑一次**:
-```powershell
-.\launch.ps1 start
+**现象**:`.\launch.ps1 start` 在等待阶段提示:
 ```
-脚本检测到 VM 已 `Running` 会跳过 launch,只补挂载 + 起隧道。
+cloud-init status --wait 超时(5 分钟),VM 可能已就绪,继续后续步骤验证
+```
+或:
+```
+cloud-init status --wait 返回非零...,继续
+```
 
-先确认 VM 和工具装好了:
+**含义**:这不是直接说明 VM 创建失败或成功。`cloud-init status --wait` 的非零退出可能只是 schema warning;脚本会继续尝试挂载和起隧道。若 launch 的旁路探测到 status 不是 `done`/`running`,会停止并要求先排查。
+
+**诊断**:
 ```powershell
-multipass list
-multipass exec claude-dev -- bash -lc "node -v; which claude"
+multipass exec claude-dev -- cloud-init status --long
+multipass exec claude-dev -- sudo tail -n 80 /var/log/cloud-init-output.log
+```
+
+- `status: running`:安装仍在进行,继续等待;长时间无新日志再排查网络或安装命令
+- `status: done`:安装已完成。若原启动流程被中断,重新 `start`(传统或多目录模式跟原先一致),它会复用 Running VM 并补齐挂载和隧道
+- `status: error` 或日志有明确失败:保留日志定位原因;只有确认要干净重装时才 `delete + start`。重新 `start` 不会自动重跑已失败的 cloud-init
+
+如需确认工具是否已装好,可在 `status: done` 后检查:
+```powershell
+multipass exec claude-dev -- bash -lc "node -v; command -v claude; command -v fish"
 ```
 
 ---
@@ -61,6 +71,11 @@ multipass exec claude-dev -- bash -lc "node -v; which claude"
 ## §C 宿主机 .claude 权限锁死,env 同步为空(VM 弹登录菜单)
 
 **现象**:VM 里 `claude` 弹「Select login method」登录菜单;`multipass exec claude-dev -- bash -lc "cat ~/.claude/settings.json"` 是 `{"env":{}}`(空 env)。
+
+**避免泄露凭证**:不要用 `cat ~/.claude/settings.json`、`jq .env`、截图或聊天日志输出该文件;其中的 token 可能是明文。改用无输出校验:
+```powershell
+multipass exec claude-dev -- bash -lc "jq -e '.env | type == \"object\" and length > 0' ~/.claude/settings.json >/dev/null && echo OK || echo EMPTY"
+```
 
 **根因链**:
 1. 宿主机 `%USERPROFILE%\.claude\settings.json` 或 `.claude` 目录的 Windows ACL 异常(缺当前用户条目 / 所有者是 Administrators / ACL 空)。
@@ -88,10 +103,10 @@ icacls C:\Users\<你>\.claude /reset /t /c
 
 **验证修好了**:
 ```powershell
-# 宿主机能读
+# 宿主机能读(只看长度,不打印内容)
 powershell -Command "(Get-Content C:\Users\<你>\.claude\settings.json -Raw).Length"
-# VM 重新同步后 env 非空
-multipass exec claude-dev -- bash -lc "source /etc/profile.d/05-claude-config.sh; sync_claude_config; cat ~/.claude/settings.json"
+# VM 重新同步后,只验证 env 为非空对象;不要打印 token
+multipass exec claude-dev -- bash -lc "source /etc/profile.d/05-claude-config.sh; sync_claude_config; jq -e '.env | type == \"object\" and length > 0' ~/.claude/settings.json >/dev/null && echo OK || echo EMPTY"
 ```
 
 > **重要教训**:不要为了"让 VM 读到"而对 settings.json 单独 `icacls /grant <用户>:(R)` ——只给读会覆盖掉 cc-switch 依赖的写权限,导致 cc-switch 换 provider 时报 `IO 错误 ... settings.json.tmp ... 拒绝访问 (os error 5)`。正确做法是上面的 `/reset` 恢复标准继承权限(读写都在),一步到位。
@@ -112,7 +127,7 @@ PowerShell 根本没启动,exit code 5。这是 Git Bash 环境自身的 fork/sp
 - **重试**:同一条命令再跑一两次通常就过。
 - **减少 fork**:把多步 PowerShell 逻辑写成一个 `.ps1` 临时文件,`powershell -NoProfile -ExecutionPolicy Bypass -File C:\...\x.ps1` 一次执行,别用长管道 / 多命令拼接。
 - **变量被吞**:Git Bash 会把 `$var`、`$_` 当自己的变量吞掉,导致 PowerShell 报 "Missing expression"。同样用 `.ps1` 文件规避,别在 `powershell -Command "..."` 里内联 `$`。
-- **VM 内路径被改写**:`multipass exec claude-dev -- cat /home/...` 会被 MSYS 把 `/home/...` 改写成 `C:/Program Files/Git/home/...`。用 `bash -lc '...'` 包一层(`multipass exec claude-dev -- bash -lc 'cat ~/.claude/settings.json'`),或前置 `MSYS_NO_PATHCONV=1`。
+- **VM 内路径被改写**:`multipass exec claude-dev -- cat /home/...` 会被 MSYS 把 `/home/...` 改写成 `C:/Program Files/Git/home/...`。用 `bash -lc '...'` 包一层(`multipass exec claude-dev -- bash -lc 'ls ~/workspace'`);涉及 settings 时只做无输出检查,例如 `multipass exec claude-dev -- bash -lc 'jq -e ".env | type == \"object\" and length > 0" ~/.claude/settings.json >/dev/null'`,不要 `cat` 该文件;或前置 `MSYS_NO_PATHCONV=1`。
 
 ---
 
@@ -136,8 +151,84 @@ Stop-Process -Id (Get-Content .tunnel.pid) -Force; Remove-Item .tunnel.pid
 > ```
 > 是 `127.0.0.1:15721` → 依赖隧道,§E 要认真修;是公网 URL → 隧道断了也不影响 claude,先测 VM 能否直连该 URL(`curl -sS -o /dev/null -w '%{http_code}' <url>`)。
 
+### §E.1 宿主机 `.ssh-key` 权限过宽(ExitCode 255)
+
+**现象**:VM `Running`、`sshd` 已运行、`multipass exec` 正常,但启动隧道仍报:
+
+```text
+SSH 隧道秒退,ExitCode=255
+```
+
+用宿主机 PowerShell 运行同等 SSH 命令并加 `-vvv` 后,若末尾出现:
+
+```text
+WARNING: UNPROTECTED PRIVATE KEY FILE!
+Bad permissions ... .ssh-key
+Load key ".\\.ssh-key": bad permissions
+```
+
+**根因**:项目 `.ssh-key` 继承了 `NT AUTHORITY\Authenticated Users`、`BUILTIN\Users` 或 `Everyone` 的访问权。Windows OpenSSH 因私钥可被其他用户读取而拒绝用它签名;这会表现为认证后的隧道 ExitCode 255。
+
+**确认后修复**(改宿主机私钥 ACL,先确认再执行;在项目根目录 PowerShell):
+
+```powershell
+$key = Join-Path $PWD '.ssh-key'
+icacls $key /inheritance:r
+icacls $key /remove:g 'NT AUTHORITY\Authenticated Users' 'BUILTIN\Users' 'Everyone'
+icacls $key /grant:r "${env:USERNAME}:(R)"
+icacls $key
+```
+
+最后输出不应再有 `Authenticated Users`、`BUILTIN\Users` 或 `Everyone`;当前 Windows 用户保留 `(R)` 即可。然后无需重建 VM,直接:
+
+```powershell
+.\launch.ps1 start        # VM Running 时只重挂/重起隧道
+.\launch.ps1 status
+```
+
+> 本项目已有的 `.ssh-key` 原本可以正常工作;若突然发生此问题,通常是目录/文件 ACL 后来被继承或被其他权限操作修改,不是 VM 的 sshd 或公钥注入故障。
+
+---
+
+## §F Multipass Windows 服务/后端卡死
+
+**现象**:`multipass list` 一直不返回/超时,或 `launch.ps1` 报 `daemon 自动重设失败`;也包括 `multipass launch` 卡在 `Waiting for SSH to be up`、报 `Timed out waiting for instance launch`。这些都不能直接说明 VM 不存在或 cloud-init 损坏。
+
+**根因边界**:`launch.ps1` 已会在普通 daemon/GUI 卡住时结束 `multipassd`、`multipass.gui` 并等待恢复;若连 `multipass list` 仍卡住,通常是 Windows 的 `Multipass` 服务或 Hyper-V 后端本身未释放,需要管理员权限处理。不要反复运行 `start`,也**不要在 VM 状态未知时执行 `delete`**。
+
+**确认后修复**(会终止 Multipass 的进行中操作、改变 Windows 服务状态,先征得用户同意;以**管理员身份**打开 PowerShell):
+
+```powershell
+# 先尝试正常重启服务
+Restart-Service -Name Multipass -Force
+```
+
+若该命令一直停在 `Waiting for service ... to stop...`,按 `Ctrl+C` 中断等待;再查询**当前**服务进程 PID 后,只结束该 PID,随后启动服务(不要复用旧日志中的 PID):
+
+```powershell
+$svc = Get-CimInstance Win32_Service -Filter "Name='Multipass'"
+$svc.ProcessId
+Stop-Process -Id $svc.ProcessId -Force
+Start-Service -Name Multipass
+```
+
+等几秒后必须先验证控制面已恢复:
+
+```powershell
+multipass list
+```
+
+能列出 VM 后,先看 `claude-dev` 是否已经是 `Running`;它可能已由 Hyper-V 创建,只是原 launch 未等到 SSH。若是 Running,回到项目根目录补完流程(VM Running 时不会重新 launch 镜像,只重挂/重起隧道):
+
+```powershell
+.\launch.ps1 start        # 多目录模式跟原先一致,加 -NoRootWorkspace
+.\launch.ps1 status
+```
+
+若强制结束服务进程后仍无法启动服务,或 `multipass list` 仍卡住,重启 Windows 后再验证 `multipass list`;恢复前不要 delete/rebuild VM。
+
 ---
 
 ## 安全提醒
 
-排障 §C 过程中会读到宿主机 `settings.json` 里的 `ANTHROPIC_AUTH_TOKEN`(明文)。若在协作/日志环境下暴露了,提醒用户去 cc-switch 轮换该 token。
+排障过程不应输出 `ANTHROPIC_AUTH_TOKEN`:不要 `cat ~/.claude/settings.json`、`jq .env`,也不要把该文件截图或写入聊天日志。若已在协作/日志环境暴露 token,去 cc-switch 轮换它。

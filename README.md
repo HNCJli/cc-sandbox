@@ -34,10 +34,12 @@ Windows 宿主机
 └─ Multipass VM "claude-dev"          Ubuntu 26.04
      ├─ ubuntu 用户(非 root,免密 sudo)
      ├─ Claude Code                    npm 全局装
-     ├─ tmux + TUI 修复
+     ├─ Fish + fzf + zoxide + tmux      交互 shell + TUI 修复
      ├─ ~/.claude/settings.json        只含 env(白名单),RO,Claude Code 改不了
      ├─ ~/.claude-host/                ← 宿主机 ~/.claude 整目录挂载(VM 内 RO)
-     ├─ ~/workspace                     ← ./workspace/ 持久挂载
+     ├─ ~/workspace                     ← 传统模式:./workspace/ 持久挂载;
+     │                                   多目录模式(-NoRootWorkspace):VM 本地父目录
+     │                                   + 各宿主目录挂到 ~/workspace/<子目录>
      └─ 127.0.0.1:15721                ← SSH 反向隧道 ← 宿主机 cc-switch
 ```
 
@@ -107,6 +109,29 @@ netstat -ano | findstr 15721
 ```
 
 VM 里仍挂到 `~/workspace`(位置不变)。换目录时直接再 `start` 一次即可,无需 `restart`。
+
+### 多目录挂载(挂多个 workspace 子目录)
+
+需要同时挂多个宿主机目录到 VM 时,用 `-NoRootWorkspace` + `-ExtraMounts`(或本地 `mounts.txt`):
+
+```powershell
+.\launch.ps1 start -NoRootWorkspace -ExtraMounts "D:\code\repo1","E:\proj\repo2=alias2"
+```
+
+每项格式 `HostPath` 或 `HostPath=vmSubdir`;简写时子目录名取宿主目录最后一级。VM 内挂成 `~/workspace/<子目录>`。
+
+也可在项目根目录建本地 `mounts.txt`(基于 `mounts.example.txt` 复制,每行一项,`#` 起始为注释),`-ExtraMounts` 未传时自动读它:
+
+```text
+D:\code\repo1
+E:\proj\repo2=alias2
+```
+
+`mounts.txt` 是本地配置(`.gitignore` 忽略)。
+
+> **为什么必须 `-NoRootWorkspace`**:Multipass 1.16 在 Windows 不支持嵌套挂载(把目录挂到另一个已挂载目录内部)。根 `~/workspace` 默认挂着 `./workspace`,此时再往 `~/workspace/xxx` 挂会失败甚至卡死记录。`-NoRootWorkspace` 跳过根挂载,让 `~/workspace` 变回 VM 本地目录,子目录挂载便不再嵌套。
+>
+> 多目录模式下,`~/workspace` 是 VM 本地目录,**`delete` VM 时会丢**(子目录里的内容跟着没了)。子目录里别放原始代码,源码留在宿主机目录。
 
 ### 进 VM
 
@@ -183,6 +208,17 @@ Host claude-dev
 ```
 
 VM IP 在 stop/start 后可能变,需更新。持久的 `multipass shell` 不受影响。
+
+## VM 交互 shell:Fish
+
+VM 默认交互 shell 是 **Fish**(配 fzf + zoxide)。`multipass shell claude-dev` 进去就是 fish 提示符:
+
+- **灰色历史建议**:边敲边显示匹配的历史命令,`→` 或 `Ctrl+F` 接受
+- **`Tab` 补全** / **`Ctrl+R`** 模糊搜历史(fzf)
+- **`z <关键词>`** 智能跳转目录(zoxide,基于使用频率)
+- 临时需要 bash 敲 `bash`;`.sh` 脚本和 cloud-init 仍走 bash
+
+每次敲 `claude` 前,fish 和 bash 一样会自动重新同步 cc-switch env(读 `~/.claude-host`,jq 过滤,写 `~/.claude/settings.json` chmod 444)。
 
 ## 可选:VM 内装 Docker
 
