@@ -123,3 +123,7 @@ systemctl --user enable --now cc-pocket-daemon
 | 挂载失败 / 非 ASCII 路径 | 见项目 README「挂载失败」 |
 
 **注意**:§A(镜像源)和 §C(权限)这两类问题**不是每台机器都有**——只在遇到对应报错时才处理,别在正常机器上预防性乱改全局设置或文件权限。
+
+## 回归验证
+
+改了 launch.ps1 / cloud-init.yaml / tmux.conf 之后,跑 [references/verification.md](./references/verification.md) 的清单(至少测试 1 + 4)确认没破。
