@@ -7,7 +7,9 @@ hostname: claude-dev
 users:
   - default   # 用现成的 ubuntu 用户(非 root, 免密 sudo, claude-code 不拒绝)
 
-package_update: true
+# package_update 关掉:Ubuntu image 自带 apt 索引够装 fish/fzf/zoxide 等小包,
+# apt update 在慢网络下耗时 1-2 分钟纯浪费。image 升级后索引太旧再手动开。
+package_update: false
 packages:
   - git
   - curl
