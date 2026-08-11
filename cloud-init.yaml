@@ -125,11 +125,7 @@ runcmd:
   - chmod 600 /home/ubuntu/.ssh/authorized_keys
   - locale-gen C.UTF-8
   - update-locale LANG=C.UTF-8
-  # Node 20(LTS)
-  - curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
-  - apt-get install -y nodejs
-  # Claude Code
-  - npm install -g @anthropic-ai/claude-code
+{{BUNDLE_BLOCK}}
   # Fish 作 ubuntu 的交互 shell;.sh 脚本和 cloud-init 仍走 Bash
   - chsh -s /usr/bin/fish ubuntu
   # cc-pocket daemon(手机遥控 Claude Code;自带 JRE,只需 curl+tar)

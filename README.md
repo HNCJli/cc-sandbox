@@ -17,7 +17,8 @@
 ```powershell
 git clone <repo-url>
 cd claude-code-multipass
-.\launch.ps1 start          # 首次 3-5 分钟,装 Node + Claude Code
+.\prepare-bundle.ps1         # 可选:准备离线 bundle(~113MB,首次慢,后续 delete+start 提速 10+ 分钟)
+.\launch.ps1 start           # 首次 3-15 分钟(有 bundle < 2 分钟,无 bundle 看网络)
 multipass shell claude-dev
 # VM 内:
 claude --dangerously-skip-permissions
@@ -219,6 +220,43 @@ VM 默认交互 shell 是 **Fish**(配 fzf + zoxide)。`multipass shell claude-d
 - 临时需要 bash 敲 `bash`;`.sh` 脚本和 cloud-init 仍走 bash
 
 每次敲 `claude` 前,fish 和 bash 一样会自动重新同步 cc-switch env(读 `~/.claude-host`,jq 过滤,写 `~/.claude/settings.json` chmod 444)。
+
+## 可选:离线 bundle(慢网络/迭代快)
+
+慢网络下 cloud-init 装 Node + Claude Code 要 10–15 分钟,反复 `delete + start` 浪费时间。**离线 bundle** 把 Node 20 LTS + Claude Code 预下载到本地,launch 时直接挂进 VM 装,cloud-init 压到 < 2 分钟。
+
+### 准备
+
+```powershell
+.\prepare-bundle.ps1              # 缺啥下啥,首次约 113 MB(慢网络可能 5-10 分钟)
+# 之后:
+.\launch.ps1 delete               # 清旧 VM(旧 VM 已在线装过,不重建用不上 bundle)
+.\launch.ps1 start                # 新 VM 走离线模式,< 2 分钟完成 cloud-init
+```
+
+bundle 齐全后,`launch.ps1 start` 自动检测并走离线模式;不齐就降级为在线模式(继续可用)。
+
+### 更新
+
+`@anthropic-ai/claude-code` 发新版或想升 Node 版本:
+
+```powershell
+.\prepare-bundle.ps1 -Force       # 重下最新
+.\launch.ps1 delete
+.\launch.ps1 start
+```
+
+### 内容
+
+| 文件 | 大小 | 用途 |
+|---|---|---|
+| `node-vXX.X.X-linux-x64.tar.xz` | ~25 MB | Node 20 LTS Linux 二进制(含 npm/npx) |
+| `anthropic-ai-claude-code-X.X.X.tgz` | ~25 KB | Claude Code wrapper 包 |
+| `anthropic-ai-claude-code-linux-x64-X.X.X.tgz` | ~93 MB | Claude Code Linux 真二进制 |
+
+> `@anthropic-ai/claude-code` 是 wrapper 包,真二进制在平台特定的 `@anthropic-ai/claude-code-linux-x64`。两个都要 bundle,wrapper postinstall 才能把二进制装到位。
+
+bundle 不进 git(只 `bundle/README.md` 进),只本地存。详见 [`bundle/README.md`](bundle/README.md)。
 
 ## 可选:VM 内装 Docker
 

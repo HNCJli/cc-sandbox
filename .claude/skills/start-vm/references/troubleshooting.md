@@ -66,6 +66,8 @@ multipass exec claude-dev -- sudo tail -n 80 /var/log/cloud-init-output.log
 multipass exec claude-dev -- bash -lc "node -v; command -v claude; command -v fish"
 ```
 
+> **cloud-init 太慢(>10 分钟)?** 跑一次 `.\prepare-bundle.ps1` 准备离线 bundle(~113MB,一次性),之后 `delete + start` 走离线模式,cloud-init < 2 分钟。详见 README「可选:离线 bundle」。
+
 ---
 
 ## §C 宿主机 .claude 权限锁死,env 同步为空(VM 弹登录菜单)

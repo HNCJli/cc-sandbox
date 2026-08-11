@@ -10,4 +10,8 @@ workspace/
 # mounts.txt 是用户本地多目录挂载配置(基于 mounts.example.txt 复制),不进 git
 mounts.txt
 
+# bundle/ 二进制离线包(~113MB),只保留 bundle/README.md 进 git
+bundle/*
+!bundle/README.md
+
 .idea/

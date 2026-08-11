@@ -303,9 +303,28 @@ function Get-VmState { (Get-VmRecord).State }
 # VM IP,失败返 $null
 function Get-VmIp { (Get-VmRecord).IPv4 }
 
+# ====== Bundle 检测 ======
+# 检测 bundle/ 是否齐全(Node tarball + Claude wrapper + Claude Linux 二进制)
+# 齐全 → launch 时加 --mount bundle:/home/ubuntu/.bundle + 渲染离线 runcmd
+# 不齐 → 走在线模式(现状)
+function Test-BundleReady {
+    $bundleDir = Join-Path $scriptDir 'bundle'
+    if (-not (Test-Path $bundleDir)) { return $false }
+    $hasNode  = Get-ChildItem $bundleDir -Filter 'node-v*-linux-x64.tar.xz' -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+    $hasWrap  = Get-ChildItem $bundleDir -Filter 'anthropic-ai-claude-code-*.tgz' -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -notmatch 'linux-x64' } | Select-Object -First 1
+    $hasLinux = Get-ChildItem $bundleDir -Filter 'anthropic-ai-claude-code-linux-x64-*.tgz' -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+    return -not (-not $hasNode -or -not $hasWrap -or -not $hasLinux)
+}
+
 # ====== 渲染 cloud-init ======
 function Render-CloudInit {
-    param([switch]$EnableTailscale)
+    param(
+        [switch]$EnableTailscale,
+        [switch]$BundleEnabled
+    )
     Write-Step "渲染 cloud-init.yaml..."
 
     $templatePath = Join-Path $scriptDir "cloud-init.yaml"
@@ -341,6 +360,30 @@ function Render-CloudInit {
         $tailscaleBlock = ""
     }
     $rendered = $rendered.Replace('{{TAILSCALE_BLOCK}}', $tailscaleBlock)
+
+    # bundle 块:启用时用离线 runcmd(从挂载的 /home/ubuntu/.bundle/ 装 Node + Claude Code),
+    # 否则在线模式(curl nodesource + npm registry)
+    # 离线模式依赖 launch --mount bundle:/home/ubuntu/.bundle,cloud-init runcmd 时该路径已可读
+    if ($BundleEnabled) {
+        $bundleBlock = @"
+  # Node 20(离线:bundle/ 里的官方 tarball,解压到 /usr/local。tarball 自带 npm/npx)
+  - tar -xJf /home/ubuntu/.bundle/node-v*-linux-x64.tar.xz -C /usr/local --strip-components=1
+  # Claude Code(离线:先装 linux 真二进制,再装 wrapper。wrapper postinstall 把二进制拷到 bin/)
+  # 文件名区分:wrapper=anthropic-ai-claude-code-X.X.X.tgz;binary=...-linux-x64-X.X.X.tgz
+  # [0-9] glob 跳过 linux-x64 那个(以 'l' 开头)
+  - npm install -g /home/ubuntu/.bundle/anthropic-ai-claude-code-linux-x64-*.tgz
+  - npm install -g /home/ubuntu/.bundle/anthropic-ai-claude-code-[0-9]*.tgz
+"@
+    } else {
+        $bundleBlock = @"
+  # Node 20(LTS,在线)
+  - curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+  - apt-get install -y nodejs
+  # Claude Code(在线)
+  - npm install -g @anthropic-ai/claude-code
+"@
+    }
+    $rendered = $rendered.Replace('{{BUNDLE_BLOCK}}', $bundleBlock)
 
     $renderedPath = Join-Path $scriptDir ".cloud-init.rendered.yaml"
     $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
@@ -526,7 +569,14 @@ function Start-ClaudeDev {
         Write-Ok ".ssh-key 生成"
     }
 
-    $renderedPath = Render-CloudInit -EnableTailscale:$EnableTailscale
+    # bundle 检测(只对新 launch 生效;现有 VM 已经装过了,不重复走离线)
+    $bundleReady = Test-BundleReady
+    if ($bundleReady) {
+        Write-Ok "检测到 bundle,本次 launch 走离线模式"
+    } else {
+        Write-Warn "bundle 不齐,走在线模式(跑 .\prepare-bundle.ps1 提速)"
+    }
+    $renderedPath = Render-CloudInit -EnableTailscale:$EnableTailscale -BundleEnabled:$bundleReady
 
     # 启动或唤醒 VM
     Write-Step "启动 VM(首次 3-5 分钟,cloud-init 装 Node + Claude Code)..."
@@ -551,8 +601,14 @@ function Start-ClaudeDev {
                             "--memory", "${memoryGB}G",
                             "--disk", "${diskGB}G",
                             "--cloud-init", $renderedPath,
-                            "--timeout", "1200",
-                            $image)
+                            "--timeout", "1200")
+            # bundle 齐全时,launch 时就挂载 bundle/ → /home/ubuntu/.bundle
+            # 关键:cloud-init runcmd 在首次启动时跑,launch 之后才挂就晚了 → 必须用 --mount
+            if ($bundleReady) {
+                $bundleHost = Join-Path $scriptDir 'bundle'
+                $launchArgs += @('--mount', "${bundleHost}:/home/ubuntu/.bundle")
+            }
+            $launchArgs += $image
             # launch 不走 WithRecovery:重启 daemon 会让正在创建的 VM 状态更乱
             # 用裸 Invoke-Multipass 超时;超时后用 exec 旁路探测 VM 真实状态
             # --timeout 1200 把 multipass CLI 自己的超时从默认 5 分钟拉到 20 分钟

@@ -23,6 +23,8 @@ netstat -ano | findstr 15721   # cc-switch 应 LISTENING 在 127.0.0.1:15721
 
 三者缺一见 README「前置」。cc-switch 端口若非 15721,跑 `start` 时带 `-CcSwitchPort <端口>`。
 
+**慢网络强烈建议**:跑一次 `.\prepare-bundle.ps1` 准备离线 bundle(~113MB,首次慢但只下一次)。之后 `delete + start` 的 cloud-init 从 13 分钟 → < 2 分钟。launch.ps1 自动检测 bundle 决定走离线/在线,不用手动切换。
+
 ### 2. 启动(选一种挂载模式)
 
 **传统单根模式**(默认,简单):项目下 `./workspace/` 挂为 VM 根 `~/workspace`。
