@@ -20,23 +20,24 @@ param(
     [string]$WorkspaceHost = "",
 
     # 可调配置(也可改 $script: 默认值)
-    [string]$Image     = "resolute",    # Ubuntu 26.04 LTS
+    [string]$Image     = "noble",       # Ubuntu 24.04 LTS
     [int]$Cpus         = 2,
     [int]$MemoryGB     = 4,
     [int]$DiskGB       = 20,
     [int]$CcSwitchPort = 15721,         # cc-switch 在宿主机监听的端口
 
+    [string]$AptMirror = "mirrors.aliyun.com", # VM 初始化时使用的 Ubuntu APT 镜像
     # 预装 tailscale(家里跨网络用,配对后手机 4G 能通过 cc-pocket 遥控;公司场景别开,会被软件审计识别)
     [switch]$EnableTailscale,
 
     # 额外挂载列表,每项 "HostPath" 或 "HostPath=vmSubdir",挂到 ~/workspace/<vmSubdir>
     # 简写时子目录名取宿主目录最后一级。传了此参数则不读 mounts.txt(参数优先)
-    # 必须配合 -NoRootWorkspace 使用(避开 Multipass 1.16 嵌套挂载 bug)
+    # 必须配合 -NoRootWorkspace 使用(多目录模式:~/workspace 是 VM 本地目录)
     [Parameter()]
     [string[]]$ExtraMounts = @(),
 
     # 跳过根 workspace 挂载(并卸掉已有根挂载)。开了它,~/workspace 就是 VM 本地目录,
-    # ExtraMounts 的子目录挂载便不再"嵌套在另一个挂载里",可避开 multipass 嵌套挂载失效的 bug
+    # ExtraMounts/mounts.txt 的子目录挂载便不再"嵌套在另一个挂载里"
     [Parameter()]
     [switch]$NoRootWorkspace
 )
@@ -46,6 +47,7 @@ param(
 $ErrorActionPreference = "Continue"
 $scriptDir = $PSScriptRoot
 Set-Location $scriptDir
+. (Join-Path $scriptDir 'progress.ps1')
 
 # ====== 常量(不变项) ======
 $vmName         = "claude-dev"
@@ -58,8 +60,154 @@ function Write-Step($msg) { Write-Host "==> $msg" -ForegroundColor Cyan }
 function Write-Ok($msg)   { Write-Host "    OK  $msg" -ForegroundColor Green }
 function Write-Warn($msg) { Write-Host "    !   $msg" -ForegroundColor Yellow }
 
-# ====== multipass 命令超时包装 + daemon 自愈 ======
-# multipassd 在 Windows 上不稳定(尤其 1.16.x),所有调用必须走超时包装,避免 daemon 卡死时连锁失败
+# ====== cloud-init 安全进度 ======
+# 只读取 cloud-init 写入的固定进度文件,不转发原始日志,避免泄露 token/环境变量
+function Show-CloudInitProgress {
+    param([Parameter(Mandatory)] [string]$VmName)
+    $command = 'cat /run/claude-dev/progress 2>/dev/null; echo __PACKAGES__; cat /run/claude-dev/packages 2>/dev/null; echo __EVENTS__; cat /run/claude-dev/events 2>/dev/null'
+    $r = Invoke-Multipass -ArgumentList @('exec', $VmName, '--', 'bash', '-lc', $command) -TimeoutSec 8
+    if ($r.ExitCode -ne 0 -or $r.TimedOut -or -not $r.Stdout) { return $null }
+    $values = @{}
+    $packages = @()
+    $events = @()
+    $section = 'progress'
+    foreach ($line in ($r.Stdout -split "`r?`n")) {
+        if ($line -eq '__PACKAGES__') { $section = 'packages'; continue }
+        if ($line -eq '__EVENTS__') { $section = 'events'; continue }
+        if ($section -eq 'packages') {
+            if ($line -match '^[a-z0-9][a-z0-9+.-]*$') { $packages += $line }
+        } elseif ($section -eq 'events') {
+            if ($line -match '^event=(.+)$') { $events += $Matches[1] }
+            elseif ($line -match '^id=([^|]+)\|(.+)$') { $events += ($Matches[1] + '|' + $Matches[2]) }
+        } elseif ($line -match '^(stage|package|package_name)=(.+)$') {
+            $values[$Matches[1]] = $Matches[2]
+        }
+    }
+    $values['packages'] = $packages
+    $values['events'] = $events
+    return $values
+}
+
+function Show-LaunchRuntimeProgress {
+    param([Parameter(Mandatory)] [string]$VmName)
+    $r = Invoke-Multipass -ArgumentList @('info', $VmName) -TimeoutSec 8
+    if ($r.ExitCode -ne 0 -or $r.TimedOut -or -not $r.Stdout) { return }
+    $state = if ($r.Stdout -match 'State:\s+(\w+)') { $Matches[1] } else { '' }
+    $ip = if ($r.Stdout -match 'IPv4:\s+([^\s]+)') { $Matches[1] } else { '' }
+    if (-not $script:launchProgressShown) { $script:launchProgressShown = @{} }
+    if (-not $script:launchProgressShown['vm-create']) {
+        $script:launchProgressShown['vm-create'] = $true
+        Write-Host '[VM 1/4] 准备 Ubuntu 镜像并创建 VM' -ForegroundColor Cyan
+    }
+    if ($state -eq 'Running' -and -not $script:launchProgressShown['vm-running']) {
+        $script:launchProgressShown['vm-running'] = $true
+        Write-Host '    VM 状态：Running' -ForegroundColor DarkGray
+    }
+    if (-not $script:launchProgressShown['network']) {
+        $script:launchProgressShown['network'] = $true
+        Write-Host '[VM 2/4] VM 网络已就绪' -ForegroundColor Cyan
+        Write-Host '    等待 SSH 和 cloud-init...' -ForegroundColor DarkGray
+    }
+    if (-not $script:launchProgressShown['ssh']) {
+        $ssh = Invoke-Multipass -ArgumentList @('exec', $VmName, '--', 'true') -TimeoutSec 8
+        if ($ssh.ExitCode -eq 0 -and -not $ssh.TimedOut) {
+            $script:launchProgressShown['ssh'] = $true
+            Write-Host '[VM 3/4] SSH 服务已就绪' -ForegroundColor Cyan
+        }
+    }
+    if ($script:launchProgressShown['ssh'] -and -not $script:launchProgressShown['cloud-init']) {
+        $script:launchProgressShown['cloud-init'] = $true
+        Write-Host '[VM 4/4] 开始 cloud-init 初始化' -ForegroundColor Cyan
+    }
+}
+
+function Show-EarlyCloudInitLogProgress {
+    param([Parameter(Mandatory)] [string]$VmName)
+    $r = Invoke-Multipass -ArgumentList @('exec', $VmName, '--', 'bash', '-lc', "grep -E '^Get:[0-9]+ ' /var/log/cloud-init-output.log 2>/dev/null | tail -n 1") -TimeoutSec 8
+    if ($r.ExitCode -ne 0 -or $r.TimedOut -or -not $r.Stdout) { return }
+    if ($r.Stdout -match '^Get:([0-9]+)\s+(.+)$') {
+        $key = "apt:$($Matches[1])"
+        if (-not $script:cloudInitShown[$key]) {
+            $script:cloudInitShown[$key] = $true
+            Write-Host ("    APT 索引：已下载第 {0} 项" -f $Matches[1]) -ForegroundColor DarkGray
+        }
+    }
+}
+
+function Write-CloudInitProgress {
+    param([hashtable]$Progress)
+    if (-not $Progress) { return }
+    Render-ProgressSnapshot -Progress $Progress
+}
+
+function Wait-CloudInitWithProgress {
+    param([Parameter(Mandatory)] [string]$VmName)
+    Write-Step "等 VM 初始化完成（进度实时显示）..."
+    $deadline = (Get-Date).AddSeconds(1200)
+    $last = ''
+    try {
+        while ((Get-Date) -lt $deadline) {
+            $progress = Show-CloudInitProgress -VmName $VmName
+            Show-EarlyCloudInitLogProgress -VmName $VmName
+            Write-CloudInitProgress -Progress $progress
+
+            $status = Invoke-Multipass -ArgumentList @('exec', $VmName, '--', 'cloud-init', 'status') -TimeoutSec 15
+            if ($status.Stdout -match 'status:\s+(done|error|running|未运行)') {
+                if ($Matches[1] -eq 'done' -or $Matches[1] -eq 'error') { return $Matches[1] }
+            }
+            Start-Sleep -Seconds 2
+        }
+        Write-Warn "cloud-init status 等待超时(20 分钟),继续后续步骤验证"
+        return 'timeout'
+    } finally {
+        Write-Host "    cloud-init 进度监视已结束" -ForegroundColor DarkGray
+    }
+}
+function Invoke-MultipassLaunchWithProgress {
+    param(
+        [Parameter(Mandatory)] [string[]]$ArgumentList,
+        [int]$TimeoutSec = 1300
+    )
+    if (-not $script:multipassExe) { $script:multipassExe = (Get-Command multipass -ErrorAction Stop).Source }
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $script:multipassExe
+    $psi.Arguments = ($ArgumentList | ForEach-Object {
+        if ($_ -match '[\s"]') { '"' + ($_ -replace '"','\"') + '"' } else { $_ }
+    }) -join ' '
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.CreateNoWindow = $true
+    $proc = New-Object System.Diagnostics.Process
+    $proc.StartInfo = $psi
+    [void]$proc.Start()
+    $outTask = $proc.StandardOutput.ReadToEndAsync()
+    $errTask = $proc.StandardError.ReadToEndAsync()
+    $started = Get-Date
+    $last = ''
+    $script:progressState = @{}
+    $script:cloudInitShown = $script:progressState
+    $script:launchProgressShown = @{}
+    while (-not $proc.HasExited -and ((Get-Date) - $started).TotalSeconds -lt $TimeoutSec) {
+        $progress = Show-CloudInitProgress -VmName $vmName
+        Show-EarlyCloudInitLogProgress -VmName $vmName
+        Show-LaunchRuntimeProgress -VmName $vmName
+        Write-CloudInitProgress -Progress $progress
+        Start-Sleep -Seconds 2
+    }
+    $timedOut = -not $proc.HasExited
+    if ($timedOut) { try { $proc.Kill() } catch {}; try { $proc.WaitForExit(2000) | Out-Null } catch {} }
+    return @{
+        ExitCode = if ($timedOut) { -1 } else { $proc.ExitCode }
+        TimedOut = $timedOut
+        Stdout = $outTask.GetAwaiter().GetResult()
+        Stderr = $errTask.GetAwaiter().GetResult()
+    }
+}
+
+
+# 项目锁定 Multipass 1.14.1(1.16.x 的 daemon 在 Windows 不稳,勿升级)。
+# 所有调用仍走硬超时包装,防任何原因命令永不返回(daemon/网络/VM 卡死)
 
 # 调一次 multipass 命令,带硬超时,绝不抛异常,返回 hashtable 让调用方决定
 # 用 [System.Diagnostics.Process] 而非 Start-Process:PS 5.x 的 Start-Process + 重定向组合下 ExitCode 永远 null
@@ -121,67 +269,6 @@ function Invoke-Multipass {
     }
 }
 
-# 快速探测 daemon 是否响应。绝不自愈,自愈在调用方
-# 用 list 而非 version:version 只查进程在不在,daemon 重启后有"半活"窗口(version 秒回但 info/list 卡)
-# list 需要查 Hyper-V 后端,能确保 daemon 真正可服务 VM 查询
-function Assert-DaemonHealthy {
-    $r = Invoke-Multipass -ArgumentList @('list') -TimeoutSec 10
-    return (-not $r.TimedOut) -and ($r.ExitCode -eq 0)
-}
-
-# 轮询等 daemon 恢复(给 set privileged-mounts 后用)
-function Wait-DaemonHealthy {
-    param([int]$TimeoutSec = 60, [int]$IntervalSec = 2)
-    $deadline = (Get-Date).AddSeconds($TimeoutSec)
-    while ((Get-Date) -lt $deadline) {
-        if (Assert-DaemonHealthy) { return $true }
-        Start-Sleep -Seconds $IntervalSec
-    }
-    return $false
-}
-
-# kill daemon + GUI + 客户端,等 watchdog 拉起新 daemon。返回 bool。
-# 必须连 GUI 一起杀:GUI 持有 Hyper-V 句柄,只杀 daemon 时新 daemon 起来仍连不上 Hyper-V
-function Reset-Daemon {
-    param([int]$RecoverTimeoutSec = 60)
-    # PS 5.1:Stop-Process -Name a,b 要求两个进程都存在,任一缺失就报错且不 kill 另一个 → 分次杀
-    # 进程名(Stop-Process 是精确匹配):multipassd / multipass.gui / multipass
-    Stop-Process -Name multipassd    -Force -ErrorAction SilentlyContinue
-    Stop-Process -Name multipass.gui -Force -ErrorAction SilentlyContinue
-    Stop-Process -Name multipass     -Force -ErrorAction SilentlyContinue
-    # 给 OS 时间让进程真的退出 + 释放 Hyper-V 句柄(太快会拉起不健康的 daemon)
-    Start-Sleep -Milliseconds 1500
-    $ok = Wait-DaemonHealthy -TimeoutSec $RecoverTimeoutSec
-    if ($ok) {
-        # list 探测通了但内部状态可能还没完全稳定,多等几秒让 Hyper-V 后端连接完全建立
-        Start-Sleep -Seconds 5
-    }
-    return $ok
-}
-
-# 失败时 Reset-Daemon 一次后重试,仍失败抛中文错误
-# 注意:成功/失败只看 ExitCode 和 TimedOut,multipass 成功时也会往 stderr 写警告(如 mount 时)
-function Invoke-MultipassWithRecovery {
-    param(
-        [Parameter(Mandatory)] [string[]]$ArgumentList,
-        [int]$TimeoutSec = 60
-    )
-    $r = Invoke-Multipass -ArgumentList $ArgumentList -TimeoutSec $TimeoutSec
-    if ($r.TimedOut -or $r.ExitCode -ne 0) {
-        Write-Warn "multipass $($ArgumentList -join ' ') 失败/超时,正在重置 daemon..."
-        if (-not (Reset-Daemon)) {
-            throw "daemon 自动重置失败。建议:任务管理器结束 multipass.gui.exe 后重新打开 Multipass GUI,或重启电脑。"
-        }
-        Write-Ok "daemon 已恢复,重试命令"
-        $r = Invoke-Multipass -ArgumentList $ArgumentList -TimeoutSec $TimeoutSec
-        if ($r.TimedOut -or $r.ExitCode -ne 0) {
-            $err = if ($r.Stderr) { $r.Stderr.Trim() } else { "(无 stderr)" }
-            throw "重试仍失败:multipass $($ArgumentList -join ' ') ExitCode=$($r.ExitCode) stderr=$err"
-        }
-    }
-    return $r
-}
-
 # mount 专用 wrapper:成功/已挂载/失败重试,失败时只警告不抛错(保持原版"继续"语义)
 # "already mounted" 视为幂等成功,不触发 Reset
 function Try-Mount {
@@ -198,8 +285,8 @@ function Try-Mount {
             return $true
         }
         if ($attempt -eq 1) {
-            Write-Warn "$Description 失败/超时,重置 daemon 重试..."
-            if (-not (Reset-Daemon)) { break }
+            # 瞬态失败重试一次;仍失败就如实报错,不再自动重置 daemon(1.14.1 稳定,真卡死走 troubleshooting.md §F)
+            Write-Warn "$Description 失败/超时,稍后重试一次..."
         }
     }
     $err = if ($r.Stderr) { $r.Stderr.Trim() } else { "daemon 重置失败或超时" }
@@ -218,16 +305,8 @@ function Assert-Prerequisites {
     if (-not (Get-Command ssh-keygen -ErrorAction SilentlyContinue)) {
         throw "ssh-keygen 未找到。同上,装 OpenSSH。"
     }
-    # daemon 健康检查:不健康就自愈一次,失败抛错(避免后续命令连锁失败)
-    if (-not (Assert-DaemonHealthy)) {
-        Write-Warn "multipassd 无响应,正在重置..."
-        if (-not (Reset-Daemon)) {
-            throw "multipassd 自动重置失败。建议:任务管理器结束 multipass.gui.exe 后重新打开 Multipass GUI,或重启电脑。"
-        }
-        Write-Ok "daemon 已恢复"
-    }
-    # Multipass 1.16+ 默认禁用 privileged mounts,需开启才能挂宿主机目录
-    # 注意:set 会重启 multipassd,所以只在值未设时执行,且 set 后必须等 daemon 恢复
+    # Windows 上 Multipass 默认可能禁用 privileged-mounts,需开启才能挂宿主机目录
+    # 注意:set 会重启 multipassd(所有版本都是这么生效的,不是 1.16 特有 bug),所以只在值未设时执行
     $cur = Invoke-Multipass -ArgumentList @('get', 'local.privileged-mounts') -TimeoutSec 15
     $needsSet = $cur.ExitCode -ne 0 -or (-not $cur.Stdout) -or $cur.Stdout.Trim() -ne "true"
     if ($needsSet) {
@@ -238,12 +317,10 @@ function Assert-Prerequisites {
             $err = if ($setR.Stderr) { $setR.Stderr.Trim() } else { "(无 stderr)" }
             Write-Warn "set 失败: $err (挂载可能不可用)"
         }
-        # 关键:set 触发 daemon 重启,必须等恢复,否则后续 launch/info 撞死 daemon
-        Write-Step "等 daemon 重启恢复(开启 privileged-mounts 需要)..."
-        if (-not (Wait-DaemonHealthy -TimeoutSec 60)) {
-            throw "开启 privileged-mounts 后 daemon 未在 60s 内恢复。建议手动重启 Multipass GUI 后重试。"
-        }
-        Write-Ok "privileged-mounts 已开启,daemon 已恢复"
+        # set 触发 multipassd 重启,固定等 10s 恢复,不做轮询(1.14.1 稳定)
+        # 若 10s 不够,下一个 list(Test-VmExists)会 fail-fast 报 §F,不会误判成 VM 不存在
+        Start-Sleep -Seconds 10
+        Write-Ok "privileged-mounts 已开启(daemon 已重启)"
     }
 }
 
@@ -258,32 +335,19 @@ function Get-VmRecord {
     return @{ Name = $cols[0]; State = $cols[1]; IPv4 = $cols[2] }
 }
 
-# VM 是否存在(三态:exists / absent / unknown)
-# 绝不在不确定时返回 absent —— 否则上层会跑去 launch 新 VM 把现有 VM 搞乱
-# 用 list 而非 info:跟 Assert-DaemonHealthy 用同一命令,daemon 重启后 list 比 info 早可用
+# VM 是否存在(二态):list 失败直接 throw(fail-fast),绝不在不确定时猜 absent
+# 猜 absent → 上层会跑去 launch 新 VM 把现有 VM 搞乱;故宁可 throw 让用户查 §F
 function Test-VmExists {
-    foreach ($i in 1..3) {
-        $r = Invoke-Multipass -ArgumentList @('list', '--format', 'csv') -TimeoutSec 10
-        if ($r.ExitCode -eq 0) {
-            if ($r.Stdout -split "`r?`n" | Where-Object { $_ -like "$vmName,*" }) { return 'exists' }
-            return 'absent'  # list 成功但 VM 不在列表
-        }
-        Start-Sleep -Seconds 2
+    $r = Invoke-Multipass -ArgumentList @('list', '--format', 'csv') -TimeoutSec 10
+    if ($r.ExitCode -ne 0) {
+        $err = if ($r.Stderr) { $r.Stderr.Trim() } else { "(无 stderr)" }
+        throw "无法确认 VM 是否存在(multipass list 失败: $err)。见 troubleshooting.md §F:管理员重启 Multipass 服务。"
     }
-    Write-Warn "multipass list 多次超时,重置 daemon..."
-    if (Reset-Daemon) {
-        $r = Invoke-Multipass -ArgumentList @('list', '--format', 'csv') -TimeoutSec 15
-        if ($r.ExitCode -eq 0) {
-            if ($r.Stdout -split "`r?`n" | Where-Object { $_ -like "$vmName,*" }) { return 'exists' }
-            return 'absent'
-        }
-    }
-    Write-Warn "无法确认 VM 状态(daemon 抽风)"
-    return 'unknown'
+    if ($r.Stdout -split "`r?`n" | Where-Object { $_ -like "$vmName,*" }) { return $true }
+    return $false
 }
 
 # stop / delete 共用:直接跑 multipass 命令,不做 Test-VmExists 预检
-# 预检路径在 daemon 慢时会触发 30s+ list 重试 + Reset-Daemon 级联;
 # 停/删 VM 没必要预先知道状态——multipass 自己会告诉我们 VM 在不在
 # daemon 卡死时不在这里自动重置(那是 §F 用户主动操作,需要 admin)
 function Invoke-VmActionGraceful {
@@ -299,8 +363,9 @@ function Invoke-VmActionGraceful {
         return
     }
     $err = if ($r.Stderr) { $r.Stderr.Trim() } else { "" }
-    # "VM 不存在" 类错误:幂等视为已删/已停(实测字面量随版本/multipass 子命令有差异)
-    if ($err -match '(?:does not exist|not found|cannot be found|unknown instance|name.*not known)') {
+    # "VM 不存在/已停" 类错误:幂等视为已删/已停(实测字面量随版本/multipass 子命令有差异)
+    # is not running / not running / already stopped:stop 一个已停实例时 multipass 返回这类错误,同样视为成功
+    if ($err -match '(?:does not exist|not found|cannot be found|unknown instance|name.*not known|is not running|not running|already stopped)') {
         Write-Warn $AbsentMsg
         return
     }
@@ -318,9 +383,8 @@ function Get-VmState { (Get-VmRecord).State }
 function Get-VmIp { (Get-VmRecord).IPv4 }
 
 # ====== Bundle 检测 ======
-# 检测 bundle/ 是否齐全(Node tarball + Claude wrapper + Claude Linux 二进制)
-# 齐全 → launch 时加 --mount bundle:/home/ubuntu/.bundle + 渲染离线 runcmd
-# 不齐 → 走在线模式(现状)
+# 检测 bundle/ 是否齐全(Node tarball + Claude wrapper + Claude Linux 二进制 + cc-pocket)
+# 项目只走离线 bundle 安装,不齐 → start 直接报错(不做在线降级)
 function Test-BundleReady {
     $bundleDir = Join-Path $scriptDir 'bundle'
     if (-not (Test-Path $bundleDir)) { return $false }
@@ -330,14 +394,16 @@ function Test-BundleReady {
                 Where-Object { $_.Name -notmatch 'linux-x64' } | Select-Object -First 1
     $hasLinux = Get-ChildItem $bundleDir -Filter 'anthropic-ai-claude-code-linux-x64-*.tgz' -ErrorAction SilentlyContinue |
                 Select-Object -First 1
-    return -not (-not $hasNode -or -not $hasWrap -or -not $hasLinux)
+    $hasCc    = Get-ChildItem (Join-Path $bundleDir 'cc-pocket') -Filter 'cc-pocket-daemon-*-linux-x86_64.tar.gz' -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+    return -not (-not $hasNode -or -not $hasWrap -or -not $hasLinux -or -not $hasCc)
 }
 
 # ====== 渲染 cloud-init ======
 function Render-CloudInit {
     param(
         [switch]$EnableTailscale,
-        [switch]$BundleEnabled
+        [Parameter(Mandatory)] [string]$AptMirror
     )
     Write-Step "渲染 cloud-init.yaml..."
 
@@ -368,36 +434,16 @@ function Render-CloudInit {
         $tailscaleBlock = @"
   # tailscale(家里跨网络用;VM 拿 100.x.x.x tailnet IP,配对后手机 4G 能通过 cc-pocket 遥控)
   # 注:仅安装未运行 'tailscale up' 时无出站流量,但软件审计能看到包已装
+  - printf '%s\n' 'stage=5' 'package=5' 'package_name=安装 Tailscale' > /run/claude-dev/progress
   - curl -fsSL https://tailscale.com/install.sh | sh
+  - printf '%s\n' 'stage=5' 'package=6' 'package_name=Tailscale 处理完成' > /run/claude-dev/progress
 "@
     } else {
         $tailscaleBlock = ""
     }
     $rendered = $rendered.Replace('{{TAILSCALE_BLOCK}}', $tailscaleBlock)
-
-    # bundle 块:启用时用离线 runcmd(从挂载的 /home/ubuntu/.bundle/ 装 Node + Claude Code),
-    # 否则在线模式(curl nodesource + npm registry)
-    # 离线模式依赖 launch --mount bundle:/home/ubuntu/.bundle,cloud-init runcmd 时该路径已可读
-    if ($BundleEnabled) {
-        $bundleBlock = @"
-  # Node 20(离线:bundle/ 里的官方 tarball,解压到 /usr/local。tarball 自带 npm/npx)
-  - tar -xJf /home/ubuntu/.bundle/node-v*-linux-x64.tar.xz -C /usr/local --strip-components=1
-  # Claude Code(离线:先装 linux 真二进制,再装 wrapper。wrapper postinstall 把二进制拷到 bin/)
-  # 文件名区分:wrapper=anthropic-ai-claude-code-X.X.X.tgz;binary=...-linux-x64-X.X.X.tgz
-  # [0-9] glob 跳过 linux-x64 那个(以 'l' 开头)
-  - npm install -g /home/ubuntu/.bundle/anthropic-ai-claude-code-linux-x64-*.tgz
-  - npm install -g /home/ubuntu/.bundle/anthropic-ai-claude-code-[0-9]*.tgz
-"@
-    } else {
-        $bundleBlock = @"
-  # Node 20(LTS,在线)
-  - curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
-  - apt-get install -y nodejs
-  # Claude Code(在线)
-  - npm install -g @anthropic-ai/claude-code
-"@
-    }
-    $rendered = $rendered.Replace('{{BUNDLE_BLOCK}}', $bundleBlock)
+    if ($AptMirror -notmatch '^[a-zA-Z0-9.-]+(:[0-9]+)?$') { throw "-AptMirror 只能是合法 hostname,当前值: $AptMirror" }
+    $rendered = $rendered.Replace('{{APT_MIRROR_PLACEHOLDER}}', $AptMirror)
 
     $renderedPath = Join-Path $scriptDir ".cloud-init.rendered.yaml"
     $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
@@ -583,100 +629,100 @@ function Start-ClaudeDev {
         Write-Ok ".ssh-key 生成"
     }
 
-    # bundle 检测(只对新 launch 生效;现有 VM 已经装过了,不重复走离线)
+    # bundle 检测:项目只走离线 bundle 安装(不齐直接报错,不做在线降级)
     $bundleReady = Test-BundleReady
-    if ($bundleReady) {
-        Write-Ok "检测到 bundle,本次 launch 走离线模式"
-    } else {
-        Write-Warn "bundle 不齐,走在线模式(跑 .\prepare-bundle.ps1 提速)"
+    if (-not $bundleReady) {
+        throw "bundle 不完整,停止启动。项目不支持在线安装降级——请先跑 .\prepare-bundle.ps1 补齐 Node + Claude Code + cc-pocket 离线包后重试。"
     }
-    $renderedPath = Render-CloudInit -EnableTailscale:$EnableTailscale -BundleEnabled:$bundleReady
+    Write-Ok "检测到 bundle,安装模式: Node/Claude Code/cc-pocket 使用本地 bundle"
+    $renderedPath = Render-CloudInit -EnableTailscale:$EnableTailscale -AptMirror $AptMirror
 
-    # 启动或唤醒 VM
+    $script:progressState = @{}
+    $script:cloudInitShown = $script:progressState
+    $script:launchProgressShown = @{}
     Write-Step "启动 VM(首次 3-5 分钟,cloud-init 装 Node + Claude Code)..."
-    # 三态判断:绝不因 daemon 抽风误判 VM 不存在跑去 launch 新的(会把现有 VM 搞乱)
-    switch (Test-VmExists) {
-        'unknown' {
-            throw "无法确认 VM 是否存在(daemon 异常)。请手动 'multipass list' 检查后再跑,以免误操作现有 VM"
-        }
-        'exists' {
-            $state = Get-VmState
-            if ($state -eq "Running") {
-                Write-Warn "VM 已在 Running,start 改为只重挂/重起隧道"
-            } else {
-                Write-Step "唤醒 VM..."
-                Invoke-MultipassWithRecovery -ArgumentList @('start', $vmName) -TimeoutSec 90 | Out-Null
-                Write-Ok "VM 从 $state 唤醒"
+    # 二态判断:list 失败已在 Test-VmExists 里 throw(fail-fast),绝不猜 absent 跑去 launch 新的
+    if (Test-VmExists) {
+        $state = Get-VmState
+        if ($state -eq "Running") {
+            Write-Warn "VM 已在 Running,start 改为只重挂/重起隧道"
+        } else {
+            Write-Step "唤醒 VM..."
+            $r = Invoke-Multipass -ArgumentList @('start', $vmName) -TimeoutSec 90
+            if ($r.TimedOut -or $r.ExitCode -ne 0) {
+                throw "multipass start 失败(daemon 可能卡死)。见 troubleshooting.md §F:管理员重启 Multipass 服务。"
             }
+            Write-Ok "VM 从 $state 唤醒"
         }
-        'absent' {
-            $launchArgs = @("launch", "--name", $vmName,
-                            "--cpus", $cpus,
-                            "--memory", "${memoryGB}G",
-                            "--disk", "${diskGB}G",
-                            "--cloud-init", $renderedPath,
-                            "--timeout", "1200")
-            # bundle 齐全时,launch 时就挂载 bundle/ → /home/ubuntu/.bundle
-            # 关键:cloud-init runcmd 在首次启动时跑,launch 之后才挂就晚了 → 必须用 --mount
-            if ($bundleReady) {
-                $bundleHost = Join-Path $scriptDir 'bundle'
-                $launchArgs += @('--mount', "${bundleHost}:/home/ubuntu/.bundle")
-            }
-            $launchArgs += $image
-            # launch 不走 WithRecovery:重启 daemon 会让正在创建的 VM 状态更乱
-            # 用裸 Invoke-Multipass 超时;超时后用 exec 旁路探测 VM 真实状态
-            # --timeout 1200 把 multipass CLI 自己的超时从默认 5 分钟拉到 20 分钟
-            # PS 端给 1300s 留 100s 缓冲,让 multipass 的 --timeout 先触发(我们走友好恢复路径)
-            $r = Invoke-Multipass -ArgumentList $launchArgs -TimeoutSec 1300
+    } else {
+        $launchArgs = @("launch", "--name", $vmName,
+                        "--cpus", $cpus,
+                        "--memory", "${memoryGB}G",
+                        "--disk", "${diskGB}G",
+                        "--cloud-init", $renderedPath,
+                        "--timeout", "1200")
+        # 不在 multipass launch 阶段挂 bundle；先完成基础 cloud-init，再由后续流程挂载并安装。
+        $launchArgs += $image
+        # 不自动重置 daemon(1.14.1 稳定);launch 失败如实报错,见 troubleshooting.md §F
+        # --timeout 1200 把 multipass CLI 自己的超时从默认 5 分钟拉到 20 分钟
+        # PS 端给 1300s 留 100s 缓冲,让 multipass 的 --timeout 先触发(而不是 PS 硬杀)
+        $r = Invoke-MultipassLaunchWithProgress -ArgumentList $launchArgs -TimeoutSec 1300
 
-            $needProbe = $false
-            if ($r.TimedOut) {
-                # cloud-init 5.x 偶发完成信号丢失,multipass launch 一直等 —— VM 其实可能已就绪
-                Write-Warn "multipass launch 超时(20 分钟),验证 VM 实际状态..."
-                $needProbe = $true
-            } elseif ($r.ExitCode -ne 0) {
-                $err = if ($r.Stderr) { $r.Stderr.Trim() } else { "(无 stderr)" }
-                # multipass 自己的 --timeout / SSH 等待超时触发:VM 可能其实好的,走旁路探测
-                # 字面量随版本/触发路径:
-                #   "timed out waiting for initialization"(老版本)
-                #   "Timed out waiting for instance launch"(1.16.x,实测遇到)
-                #   "Timed out waiting for SSH to be up"(SSH 路径)
-                if ($err -match '(?:[Tt]imed out waiting for (?:initialization|instance launch|SSH))') {
-                    Write-Warn "multipass launch 自身超时触发,验证 VM 实际状态..."
-                    $needProbe = $true
-                } else {
-                    # 真错误(镜像名错、Hyper-V 拒绝创建等),不绕过
-                    throw "multipass launch 失败(ExitCode=$($r.ExitCode)): $err"
-                }
-            }
-            if ($needProbe) {
-                $probe = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'cloud-init', 'status') -TimeoutSec 30
-                if ($probe.ExitCode -eq 0 -and $probe.Stdout -match 'status:\s+(done|running)') {
-                    $probeStatus = $Matches[1]
-                    Write-Warn "VM 实际已就绪(cloud-init $probeStatus),launch 没返回信号是已知 bug,继续后续步骤"
-                } else {
-                    $probeErr = if ($probe.Stderr) { $probe.Stderr.Trim() } else { "(无 stderr)" }
-                    throw "multipass launch 超时且 VM 未就绪。建议:.\launch.ps1 delete 清理后重试。日志:%USERPROFILE%\.multipass\data\`n旁路探测 ExitCode=$($probe.ExitCode) stdout=$($probe.Stdout) stderr=$probeErr"
-                }
-            }
-            Write-Ok "VM 创建并启动"
+        if ($r.TimedOut) {
+            # cloud-init 5.x 偶发"完成信号丢失"(非 1.16 特有),VM 可能实际已就绪。
+            # 不再探测 VM 实际状态——直接 throw,让用户 multipass list 确认(避免掩盖真问题)。
+            throw "multipass launch 超时(20 分钟)。cloud-init 5.x 偶发完成信号丢失,VM 可能实际已就绪;请 'multipass list' 确认——若已 Running,重跑 .\launch.ps1 start 只重挂/重起隧道;若未就绪,.\launch.ps1 delete 后重试。日志:%USERPROFILE%\.multipass\data"
         }
+        if ($r.ExitCode -ne 0) {
+            $err = if ($r.Stderr) { $r.Stderr.Trim() } else { "(无 stderr)" }
+            throw "multipass launch 失败(ExitCode=$($r.ExitCode)): $err (daemon 卡死见 troubleshooting.md §F;镜像名/后端错误检查参数)"
+        }
+        Write-Ok "VM 创建并启动"
     }
 
-    # 等 cloud-init(只有新 launch 会真的跑 runcmd,但 --wait 对已 done 的会立即返回)
-    Write-Step "等 cloud-init 完成..."
-    # 不走 WithRecovery:cloud-init 偶发 schema validation 警告会让 ExitCode 非零,
-    # 走 WithRecovery 会触发不必要的 Reset(60s 浪费);daemon 卡死时超时,后续挂载会兜底自愈
-    # 超时给 1200s(20 分钟),慢网络下 npm + cc-pocket JRE 下载可能 15+ 分钟;
-    # 之前 300s 太短,会错误前进到挂载,而 cloud-init 还在跑导致挂载/卸载连锁超时
-    $r = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'cloud-init', 'status', '--wait') -TimeoutSec 1200
-    if ($r.TimedOut) {
-        Write-Warn "cloud-init status --wait 超时(20 分钟),VM 可能已就绪,继续后续步骤验证"
-    } elseif ($r.ExitCode -ne 0) {
-        Write-Warn "cloud-init status --wait 返回非零(常见:schema validation 警告 / 已 done 后再查的 transient 状态),继续"
+    # 等 cloud-init,同时在当前窗口显示安全阶段进度
+    $cloudInitProgressStatus = Wait-CloudInitWithProgress -VmName $vmName
+
+    # cloud-init 阶段结束后只记录完成,整个 bundle/挂载/隧道流程结束时才显示 [6/6]
+    if ($cloudInitProgressStatus -eq 'done') {
+        $cloudInitSnapshot = Show-CloudInitProgress -VmName $vmName
+        Complete-CloudInitProgress -Progress $cloudInitSnapshot
     }
 
-    # 挂载 .claude(RO)
+    # 基础 cloud-init 完成后再挂载 bundle，避免首次 launch --mount 与 multipass-sshfs 时序冲突
+    Write-Step "挂载离线 bundle..."
+    $bundleHost = Join-Path $scriptDir 'bundle'
+    $bundleMounted = Test-VMTargetMounted -Target '/home/ubuntu/.bundle'
+    if (-not $bundleMounted) {
+        $bundleMount = Invoke-Multipass -ArgumentList @('mount', $bundleHost, "${vmName}:/home/ubuntu/.bundle") -TimeoutSec 180
+        if ($bundleMount.TimedOut -or ($bundleMount.ExitCode -ne 0 -and $bundleMount.Stderr -notmatch 'already mounted')) {
+            throw "bundle 挂载失败，停止启动。$($bundleMount.Stderr)"
+        }
+    }
+    $bundleCheck = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'bash', '-lc', 'test -f /home/ubuntu/.bundle/node-v*-linux-x64.tar.xz && test -f /home/ubuntu/.bundle/anthropic-ai-claude-code-linux-x64-*.tgz && test -f /home/ubuntu/.bundle/cc-pocket/cc-pocket-daemon-*-linux-x86_64.tar.gz') -TimeoutSec 30
+    if ($bundleCheck.ExitCode -ne 0 -or $bundleCheck.TimedOut) { throw "bundle 挂载后关键文件不完整，停止启动" }
+    Write-Ok "bundle 已挂载且关键文件齐全"
+
+    # bundle 挂载后:先探测是否已装好(已装好跳过重装,省 ~1 分钟),否则执行本地安装
+    # 用 type -P(PATH-only)而非 command -v:profile 定义了 claude() 函数,登录 shell 下 command -v 会被函数遮蔽误报成功
+    Write-Step "检查 Node.js / Claude Code / cc-pocket 是否已在 VM 内..."
+    $probe = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'bash', '-lc', 'type -P node >/dev/null && type -P claude >/dev/null && type -P cc-pocket-daemon >/dev/null') -TimeoutSec 30
+    if ($probe.ExitCode -eq 0 -and -not $probe.TimedOut) {
+        Write-Ok "Node.js、Claude Code、cc-pocket 已在 VM 内,跳过离线重装"
+    } else {
+        # 以 root 运行(sudo):tar 解到 /usr/local、npm -g 全局安装都需要 root。
+        # 安装脚本单独存为 LF 文件,避免默认 fish 解析多行 bash -lc 参数时破坏引号/换行。
+        Write-Step "从 bundle 安装 Node.js、Claude Code 和 cc-pocket..."
+        $installScriptHost = Join-Path $scriptDir 'install-bundle.sh'
+        if (-not (Test-Path $installScriptHost)) { throw "缺少 bundle 安装脚本:$installScriptHost" }
+        $transfer = Invoke-Multipass -ArgumentList @('transfer', $installScriptHost, "${vmName}:/tmp/install-bundle.sh") -TimeoutSec 30
+        if ($transfer.TimedOut -or $transfer.ExitCode -ne 0) { throw "bundle 安装脚本传入 VM 失败。$($transfer.Stderr)" }
+        $install = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'sudo', 'bash', '/tmp/install-bundle.sh') -TimeoutSec 600
+        if ($install.TimedOut -or $install.ExitCode -ne 0) { throw "bundle 本地安装失败，停止启动。$($install.Stderr)" }
+        Write-Ok "Node.js、Claude Code、cc-pocket 本地安装完成"
+    }
+    $bundleProgress = Show-CloudInitProgress -VmName $vmName
+    Complete-BundleProgress -Progress $bundleProgress
     Write-Step "挂载宿主机 ~/.claude → VM $mountClaudeHost..."
     $hostClaude = Join-Path $env:USERPROFILE ".claude"
     if (-not (Test-Path $hostClaude)) { throw "$hostClaude 不存在,Claude Code 没装?" }
@@ -687,7 +733,7 @@ function Start-ClaudeDev {
     # 挂载 workspace —— 两种模式互斥
     if ($NoRootWorkspace) {
         # 多目录模式:不挂根 workspace,卸掉已有根挂载,~/workspace 保持 VM 本地目录
-        # 避免嵌套挂载(Multipass 1.16 在 Windows 不支持)
+        # 只挂 mounts.txt/-ExtraMounts 声明的子目录(不做根 workspace 宿主挂载)
         Write-Step "跳过根 workspace 挂载(-NoRootWorkspace),卸掉已有根挂载..."
         # 90s:慢网络 + cloud-init 在跑时 umount 也可能慢;30s 实测不够,会连锁 throw
         $unmountRoot = Invoke-Multipass -ArgumentList @('umount', "${vmName}:${mountWorkspace}") -TimeoutSec 90
@@ -758,6 +804,7 @@ function Start-ClaudeDev {
     Write-Ok "隧道 PID $($proc.Id)"
 
     Write-Host ""
+    Complete-StartupProgress
     Write-Host "==== 完成 ====" -ForegroundColor Green
     Write-Host "进入 VM:    multipass shell $vmName"
     Write-Host "VM 里跑:    claude --dangerously-skip-permissions"
@@ -774,19 +821,18 @@ function Stop-ClaudeDev {
     Write-Step "停隧道..."
     Stop-Tunnel
     Write-Step "停 VM..."
-    Invoke-VmActionGraceful -MultipassArgs @('stop', $vmName) -DoneMsg "VM 已停"
+    Invoke-VmActionGraceful -MultipassArgs @('stop', $vmName) -DoneMsg "VM 已停" -AbsentMsg "VM 已停止或不存在,跳过"
 }
 
 # ====== status ======
 function Show-Status {
     Write-Step "VM 状态"
-    switch (Test-VmExists) {
-        'exists'  { multipass info $vmName }
-        'absent'  { Write-Warn "VM 不存在" }
-        'unknown' {
-            Write-Warn "VM 状态不确定(daemon 抽风,VM 本身可能正常)"
-            Write-Warn "稍等 1-2 分钟重跑;或直接 'multipass shell $vmName' 验证 VM 是否可用"
-        }
+    # Test-VmExists 失败会 throw(fail-fast,报 §F),不会误报"VM 不存在"掩盖 daemon 问题。
+    # status 只读,这里不 try/catch,让 throw 直接作为健康信号上抛。
+    if (Test-VmExists) {
+        multipass info $vmName
+    } else {
+        Write-Warn "VM 不存在"
     }
 
     Write-Step "SSH 反向隧道"

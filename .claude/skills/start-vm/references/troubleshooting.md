@@ -15,7 +15,7 @@ multipass launch 失败
 ```
 但网络正常、`multipass version` 正常。
 
-**根因**:Multipass 全局配了非官方镜像源(常见于国内加速,如清华 TUNA),而该源的 simplestreams 索引解析不出 `resolute` 别名对应的 remote。
+**根因**:Multipass 全局配了非官方镜像源(常见于国内加速,如清华 TUNA),而该源的 simplestreams 索引解析不出 `noble` 别名对应的 remote。
 
 **诊断**:
 ```powershell
@@ -30,7 +30,7 @@ multipass set local.image.mirror=
 清空后恢复官方源。验证:
 ```powershell
 multipass get local.image.mirror     # 应为空
-multipass find                        # 应能列出 26.04 / resolute 别名
+multipass find                        # 应能列出 24.04 / noble 别名
 ```
 然后重跑 `.\launch.ps1 start`。
 
@@ -42,14 +42,10 @@ multipass find                        # 应能列出 26.04 / resolute 别名
 
 **现象**:`.\launch.ps1 start` 在等待阶段提示:
 ```
-cloud-init status --wait 超时(5 分钟),VM 可能已就绪,继续后续步骤验证
-```
-或:
-```
-cloud-init status --wait 返回非零...,继续
+cloud-init status 等待超时(20 分钟),继续后续步骤验证
 ```
 
-**含义**:这不是直接说明 VM 创建失败或成功。`cloud-init status --wait` 的非零退出可能只是 schema warning;脚本会继续尝试挂载和起隧道。若 launch 的旁路探测到 status 不是 `done`/`running`,会停止并要求先排查。
+**含义**:等待超时不直接说明 VM 创建失败或成功。`launch.ps1` 内部轮询 `cloud-init status`(上限 20 分钟),超时后脚本会继续后续步骤(挂载 bundle + 装软件 + 起隧道);若后续步骤真正失败会直接报错终止。先 `multipass list` 确认 VM 是否已 Running(cloud-init 5.x 偶发不返回完成信号),已 Running 就重跑 `start` 只重挂/重起隧道。
 
 **诊断**:
 ```powershell
@@ -58,7 +54,7 @@ multipass exec claude-dev -- sudo tail -n 80 /var/log/cloud-init-output.log
 ```
 
 - `status: running`:安装仍在进行,继续等待;长时间无新日志再排查网络或安装命令
-- `status: done`:安装已完成。若原启动流程被中断,重新 `start`(传统或多目录模式跟原先一致),它会复用 Running VM 并补齐挂载和隧道
+- `status: done`:安装已完成。若原启动流程被中断,重新 `start`,它会复用 Running VM 并补齐挂载和隧道
 - `status: error` 或日志有明确失败:保留日志定位原因;只有确认要干净重装时才 `delete + start`。重新 `start` 不会自动重跑已失败的 cloud-init
 
 如需确认工具是否已装好,可在 `status: done` 后检查:
@@ -66,7 +62,7 @@ multipass exec claude-dev -- sudo tail -n 80 /var/log/cloud-init-output.log
 multipass exec claude-dev -- bash -lc "node -v; command -v claude; command -v fish"
 ```
 
-> **cloud-init 太慢(>10 分钟)?** 跑一次 `.\prepare-bundle.ps1` 准备离线 bundle(~113MB,一次性),之后 `delete + start` 走离线模式,cloud-init < 2 分钟。详见 README「可选:离线 bundle」。
+> **cloud-init 太慢(>10 分钟)?** 项目只走离线安装,先跑 `.\prepare-bundle.ps1` 准备离线 bundle(~220MB 含 cc-pocket,一次性),之后 `delete + start` 走离线模式,cloud-init < 2 分钟。bundle 不齐 `launch.ps1 start` 会直接报错。详见 README「离线 bundle」。
 
 ---
 
@@ -194,9 +190,11 @@ icacls $key
 
 ## §F Multipass Windows 服务/后端卡死
 
-**现象**:`multipass list` 一直不返回/超时,或 `launch.ps1` 报 `daemon 自动重设失败`;也包括 `multipass launch` 卡在 `Waiting for SSH to be up`、报 `Timed out waiting for instance launch`。这些都不能直接说明 VM 不存在或 cloud-init 损坏。
+> **1.14.1 上 daemon 稳定**,`launch.ps1` 也已去掉了自动强杀 daemon 的逻辑(失败会如实报错并指到这里)。本节只在极少数 Windows `Multipass` 服务 / Hyper-V 后端本身卡死时用到。
 
-**根因边界**:`launch.ps1` 已会在普通 daemon/GUI 卡住时结束 `multipassd`、`multipass.gui` 并等待恢复;若连 `multipass list` 仍卡住,通常是 Windows 的 `Multipass` 服务或 Hyper-V 后端本身未释放,需要管理员权限处理。不要反复运行 `start`,也**不要在 VM 状态未知时执行 `delete`**。
+**现象**:`multipass list` 一直不返回/超时;或 `launch.ps1` 报 `无法确认 VM 是否存在`、`multipass start 失败`、`multipass stop/delete ... 超时`;也包括 `multipass launch` 卡在 `Waiting for SSH to be up`、报 `Timed out waiting for instance launch`。这些都不能直接说明 VM 不存在或 cloud-init 损坏。
+
+**根因边界**:以上现象通常是 Windows 的 `Multipass` 服务或 Hyper-V 后端本身未释放,需要管理员权限处理。不要反复运行 `start`,也**不要在 VM 状态未知时执行 `delete`**。
 
 **确认后修复**(会终止 Multipass 的进行中操作、改变 Windows 服务状态,先征得用户同意;以**管理员身份**打开 PowerShell):
 
@@ -223,7 +221,7 @@ multipass list
 能列出 VM 后,先看 `claude-dev` 是否已经是 `Running`;它可能已由 Hyper-V 创建,只是原 launch 未等到 SSH。若是 Running,回到项目根目录补完流程(VM Running 时不会重新 launch 镜像,只重挂/重起隧道):
 
 ```powershell
-.\launch.ps1 start        # 多目录模式跟原先一致,加 -NoRootWorkspace
+.\launch.ps1 start        # 多目录模式带 -NoRootWorkspace,ExtraMounts 自动重挂(VM Running 时不重新 launch)
 .\launch.ps1 status
 ```
 

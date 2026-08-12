@@ -14,4 +14,10 @@ mounts.txt
 bundle/*
 !bundle/README.md
 
+# 本地安装/进度测试脚本
+test-progress.ps1
+
+# Claude Code 本地权限设置(.local. 后缀,每台机器不同)
+.claude/settings.local.json
+
 .idea/

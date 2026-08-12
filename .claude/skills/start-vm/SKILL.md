@@ -16,14 +16,14 @@ description: 用 launch.ps1 在 Windows 上启动/唤醒 claude-dev Multipass VM
 ### 1. 前置检查(全绿再往下)
 
 ```powershell
-multipass version           # 要 >= 1.11
+multipass version           # 推荐/实测 1.14.1,勿升 1.16.x(其 daemon 在 Windows 不稳)
 ssh -V                      # OpenSSH 客户端
 netstat -ano | findstr 15721   # cc-switch 应 LISTENING 在 127.0.0.1:15721
 ```
 
 三者缺一见 README「前置」。cc-switch 端口若非 15721,跑 `start` 时带 `-CcSwitchPort <端口>`。
 
-**慢网络强烈建议**:跑一次 `.\prepare-bundle.ps1` 准备离线 bundle(~113MB,首次慢但只下一次)。之后 `delete + start` 的 cloud-init 从 13 分钟 → < 2 分钟。launch.ps1 自动检测 bundle 决定走离线/在线,不用手动切换。
+**必须准备 bundle**:项目只走离线安装,先跑一次 `.\prepare-bundle.ps1` 准备离线 bundle(~220MB 含 cc-pocket,首次慢但只下一次)。之后 `delete + start` 的 cloud-init 从 13 分钟 → < 2 分钟。bundle 不齐 `launch.ps1 start` 会直接报错,先补齐再启动。
 
 ### 2. 启动(选一种挂载模式)
 
@@ -33,16 +33,16 @@ netstat -ano | findstr 15721   # cc-switch 应 LISTENING 在 127.0.0.1:15721
 .\launch.ps1 start
 ```
 
-**多目录模式**(挂多个宿主目录到 `~/workspace/<子目录>`):先复制 `mounts.example.txt` 为本地 `mounts.txt` 填好路径,或直接传 `-ExtraMounts`。
+**多目录挂载**(挂多个宿主目录到 `~/workspace/<子目录>`):先复制 `mounts.example.txt` 为本地 `mounts.txt` 填好路径,或直接传 `-ExtraMounts`。
 
 ```powershell
 .\launch.ps1 start -NoRootWorkspace                     # 读本地 mounts.txt
 .\launch.ps1 start -NoRootWorkspace -ExtraMounts "D:\repo1","E:\repo2=alias2"
 ```
 
-两种模式不可混用;`-WorkspaceHost` 只在传统模式下用。多目录模式必须 `-NoRootWorkspace`(Multipass 1.16 在 Windows 不支持嵌套挂载)。
+多目录模式必须 `-NoRootWorkspace`(Windows 上 Multipass 对嵌套挂载支持不稳);`-WorkspaceHost` 只在传统模式(单根)下用。
 
-首次 3–5 分钟(下载 Ubuntu 镜像 + cloud-init 装 Node 20 + Claude Code + Fish/fzf/zoxide)。脚本会自动:开 privileged-mounts → 创建/唤醒 VM → 挂 `~/.claude`(RO)和 workspace → 起 SSH 反向隧道。
+首次 3–5 分钟(下载 Ubuntu 镜像 + cloud-init 装基础包;Node/Claude 从 bundle 离线装)。脚本会自动:开 privileged-mounts → 创建/唤醒 VM → 挂 `~/.claude`(RO)和 workspace → 起 SSH 反向隧道。
 
 > **后台跑法**:首次因为要下载镜像,建议后台运行 + 轮询输出文件看进度,别干等。
 
@@ -116,7 +116,7 @@ systemctl --user enable --now cc-pocket-daemon
 
 | 现象 | 分支 |
 |---|---|
-| `multipass list` 卡住/超时,或 `launch.ps1` 报 `daemon 自动重置失败`,或 launch 卡在 SSH | §F Multipass Windows 服务/后端卡死;先恢复控制面,勿立刻 delete |
+| `multipass list` 卡住/超时,或 launch 卡在 SSH | §F Multipass Windows 服务/后端卡死;先恢复控制面,勿立刻 delete |
 | `launch failed: Remote "" is unknown or unreachable` | §A 镜像源被改成了非官方源 |
 | `cloud-init status --wait` 超时/返回非零 | §B launch 后 cloud-init 探测 |
 | VM 里 env 检查是 `EMPTY`,或 `claude` 弹登录菜单 | §C 宿主机 .claude 权限锁死,env 同步为空 |

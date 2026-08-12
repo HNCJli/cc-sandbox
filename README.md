@@ -17,8 +17,8 @@
 ```powershell
 git clone <repo-url>
 cd claude-code-multipass
-.\prepare-bundle.ps1         # 可选:准备离线 bundle(~113MB,首次慢,后续 delete+start 提速 10+ 分钟)
-.\launch.ps1 start           # 首次 3-15 分钟(有 bundle < 2 分钟,无 bundle 看网络)
+.\prepare-bundle.ps1         # 必须:准备离线 bundle(~220MB 含 cc-pocket,首次慢,后续 delete+start 提速 10+ 分钟)
+.\launch.ps1 start           # 首次 3-15 分钟(镜像下载 + bundle 离线装软件)
 multipass shell claude-dev
 # VM 内:
 claude --dangerously-skip-permissions
@@ -32,7 +32,7 @@ Windows 宿主机
 ├─ ~/.claude/settings.json            cc-switch 管理
 ├─ launch.ps1                         管 VM 生命周期 + SSH 反向隧道保活
 │    └─ ssh -R 15721:127.0.0.1:15721  宿主机 → VM 的反向隧道
-└─ Multipass VM "claude-dev"          Ubuntu 26.04
+└─ Multipass VM "claude-dev"          Ubuntu 24.04 (noble)
      ├─ ubuntu 用户(非 root,免密 sudo)
      ├─ Claude Code                    npm 全局装
      ├─ Fish + fzf + zoxide + tmux      交互 shell + TUI 修复
@@ -55,9 +55,11 @@ Windows 宿主机
 
 ## 前置
 
-### 1. Multipass ≥ 1.11
+### 1. Multipass(推荐/实测 1.14.1,**勿升 1.16.x**)
 
 下载 Windows installer: <https://multipass.run/install>
+
+> 项目实测并锁定 **Multipass 1.14.1**:1.16.x 的 daemon(multipassd)在 Windows 上不稳,list/launch 会卡死或超时,需要管理员重启服务。请保持 1.14.1,不要点 Multipass 的升级提示。
 
 后端二选一:
 - **Hyper-V**(推荐,Win10/11 Pro 自带):需先在「启用或关闭 Windows 功能」勾选 Hyper-V
@@ -65,7 +67,7 @@ Windows 宿主机
 
 装好后 PowerShell 验证:
 ```powershell
-multipass version     # 要求 ≥ 1.11
+multipass version     # 应为 1.14.1,勿升 1.16.x
 ```
 
 ### 2. OpenSSH 客户端
@@ -96,7 +98,7 @@ netstat -ano | findstr 15721
 .\launch.ps1 start
 ```
 
-首次 3–5 分钟(cloud-init 装 Node + Claude Code)。完成后自动:
+首次 3–5 分钟(bundle 离线装 Node + Claude Code)。完成后自动:
 1. 开启 Multipass privileged-mounts(首次会触发 multipassd 重启,正常现象)
 2. 创建/唤醒 VM
 3. 挂载 `~/.claude` → VM `/home/ubuntu/.claude-host`(RO)
@@ -130,7 +132,7 @@ E:\proj\repo2=alias2
 
 `mounts.txt` 是本地配置(`.gitignore` 忽略)。
 
-> **为什么必须 `-NoRootWorkspace`**:Multipass 1.16 在 Windows 不支持嵌套挂载(把目录挂到另一个已挂载目录内部)。根 `~/workspace` 默认挂着 `./workspace`,此时再往 `~/workspace/xxx` 挂会失败甚至卡死记录。`-NoRootWorkspace` 跳过根挂载,让 `~/workspace` 变回 VM 本地目录,子目录挂载便不再嵌套。
+> **为什么必须 `-NoRootWorkspace`**:Windows 上 Multipass 对嵌套挂载(把目录挂到另一个已挂载目录内部)支持不稳,曾出现挂载失败甚至卡死。根 `~/workspace` 默认挂着 `./workspace`,此时再往 `~/workspace/xxx` 挂会踩到这个问题。`-NoRootWorkspace` 跳过根挂载,让 `~/workspace` 变回 VM 本地目录,子目录挂载便不再嵌套。
 >
 > 多目录模式下,`~/workspace` 是 VM 本地目录,**`delete` VM 时会丢**(子目录里的内容跟着没了)。子目录里别放原始代码,源码留在宿主机目录。
 
@@ -167,7 +169,7 @@ CPU / 内存 / 磁盘 / 镜像版本都参数化了,不用改源码:
 
 ```powershell
 .\launch.ps1 start -MemoryGB 8 -Cpus 4                # 临时给大点
-.\launch.ps1 start -Image noble                        # 临时回退 Ubuntu 24.04 测试
+.\launch.ps1 start -Image noble                        # 指定镜像版本(默认 noble / 24.04)
 ```
 (只有 `delete + start` 重建时这些参数才生效;已存在的 VM 改参数不会动)
 
@@ -221,20 +223,20 @@ VM 默认交互 shell 是 **Fish**(配 fzf + zoxide)。`multipass shell claude-d
 
 每次敲 `claude` 前,fish 和 bash 一样会自动重新同步 cc-switch env(读 `~/.claude-host`,jq 过滤,写 `~/.claude/settings.json` chmod 444)。
 
-## 可选:离线 bundle(慢网络/迭代快)
+## 离线 bundle(慢网络/迭代快)
 
-慢网络下 cloud-init 装 Node + Claude Code 要 10–15 分钟,反复 `delete + start` 浪费时间。**离线 bundle** 把 Node 20 LTS + Claude Code 预下载到本地,launch 时直接挂进 VM 装,cloud-init 压到 < 2 分钟。
+慢网络下在线装 Node + Claude Code 要 10–15 分钟,反复 `delete + start` 浪费时间。**离线 bundle** 把 Node 20 LTS + Claude Code + cc-pocket 预下载到本地,launch 时直接挂进 VM 装,cloud-init 压到 < 2 分钟。
 
 ### 准备
 
 ```powershell
-.\prepare-bundle.ps1              # 缺啥下啥,首次约 113 MB(慢网络可能 5-10 分钟)
+.\prepare-bundle.ps1              # 缺啥下啥,首次约 220 MB(含 cc-pocket,慢网络可能 5-10 分钟)
 # 之后:
-.\launch.ps1 delete               # 清旧 VM(旧 VM 已在线装过,不重建用不上 bundle)
+.\launch.ps1 delete               # 清旧 VM(旧 VM 已装过,不重建用不上新 bundle)
 .\launch.ps1 start                # 新 VM 走离线模式,< 2 分钟完成 cloud-init
 ```
 
-bundle 齐全后,`launch.ps1 start` 自动检测并走离线模式;不齐就降级为在线模式(继续可用)。
+`launch.ps1 start` 会检测 bundle/,**必须齐全才启动**:不齐直接报错(项目只走离线安装,不做在线降级),先跑 `.\prepare-bundle.ps1` 补齐。已建好的 VM 重跑 `start` 同样要求 bundle 齐全。
 
 ### 更新
 
@@ -253,6 +255,7 @@ bundle 齐全后,`launch.ps1 start` 自动检测并走离线模式;不齐就降�
 | `node-vXX.X.X-linux-x64.tar.xz` | ~25 MB | Node 20 LTS Linux 二进制(含 npm/npx) |
 | `anthropic-ai-claude-code-X.X.X.tgz` | ~25 KB | Claude Code wrapper 包 |
 | `anthropic-ai-claude-code-linux-x64-X.X.X.tgz` | ~93 MB | Claude Code Linux 真二进制 |
+| `cc-pocket/cc-pocket-daemon-X.X.X-linux-x86_64.tar.gz` | ~105 MB | cc-pocket 手机遥控(自带 JRE) |
 
 > `@anthropic-ai/claude-code` 是 wrapper 包,真二进制在平台特定的 `@anthropic-ai/claude-code-linux-x64`。两个都要 bundle,wrapper postinstall 才能把二进制装到位。
 
@@ -317,8 +320,8 @@ tailscale ip                   # 看 VM 拿到的 100.x.x.x 内网 IP
 multipass exec claude-dev -- curl -v http://127.0.0.1:15721/
 # connection refused → 隧道断了,restart
 
-# 3. settings.json 同步了吗(应只含 env,无 statusLine/mcpServers 等)
-multipass exec claude-dev -- cat /home/ubuntu/.claude/settings.json
+# 3. settings.json 同步了吗(应只含 env,无 statusLine/mcpServers 等;含明文 token,别直接 cat)
+multipass exec claude-dev -- bash -lc "jq -e '.env | type == \"object\" and length > 0' ~/.claude/settings.json >/dev/null && echo 'env 同步 OK' || echo 'env 为空'"
 ```
 
 ### 隧道进程死了
@@ -333,7 +336,7 @@ Remove-Item .tunnel.pid
 
 ### 挂载失败 / Multipass 报 "Mounts are disabled"
 
-Multipass 1.16+ 默认禁 privileged-mounts。`launch.ps1 start` 首次会自动开启(`multipass set local.privileged-mounts=true`),若失败手动执行一次即可。
+Windows 上 Multipass 默认可能禁用 privileged-mounts。`launch.ps1 start` 首次会自动开启(`multipass set local.privileged-mounts=true`),若失败手动执行一次即可。
 
 ### 挂载失败(非 ASCII 路径)
 

@@ -1,6 +1,6 @@
 # start-vm 验证清单
 
-回归测试用。按顺序跑,前 4 项必跑,5–6 可选。每次改 launch.ps1 / cloud-init.yaml / tmux.conf 后建议至少跑 1 + 4。
+回归测试用。按顺序跑,前 4 项 + 测试 6(cc-pocket 随 bundle)必跑,测试 5(Tailscale)可选。每次改 launch.ps1 / cloud-init.yaml / tmux.conf 后建议至少跑 1 + 4。
 
 **通用约定**:
 - 所有 `multipass exec claude-dev -- bash -lc "..."` 命令**别换成 `cat ~/.claude/settings.json`** —— 该文件含明文 token,见 troubleshooting §C。
@@ -56,7 +56,7 @@ claude --dangerously-skip-permissions
 
 ---
 
-## 测试 2:多目录模式(必跑,新功能)
+## 测试 2:多目录模式(必跑)
 
 **目的**:验证 `-NoRootWorkspace` + `-ExtraMounts` 挂多个宿主目录到 `~/workspace/<子目录>`。
 
@@ -85,7 +85,7 @@ mkdir D:\code\test2 -ErrorAction SilentlyContinue
 # findmnt 看到两条 mount(test1 + alias2)
 multipass exec claude-dev -- bash -lc "findmnt | grep /home/ubuntu/workspace"
 
-# ~/workspace 下有两个子目录
+# ~/workspace 下有两个子目录(~/workspace 是 VM 本地目录,不挂宿主根)
 multipass exec claude-dev -- bash -lc "ls -la ~/workspace"
 
 # 内容能读到(各 cat 输出对应 hello 字符串)
@@ -95,7 +95,7 @@ multipass exec claude-dev -- bash -lc "cat ~/workspace/alias2/b.txt"
 
 ### 预期
 
-- findmnt 输出含 `~/workspace/test1` 和 `~/workspace/alias2` 两条
+- findmnt 输出含 `~/workspace/test1` 和 `~/workspace/alias2` 两条(不嵌套在宿主根挂载下)
 - `ls` 看到两个子目录
 - 两个 cat 输出 `hello from test1` / `hello from test2`
 
@@ -123,15 +123,15 @@ multipass exec claude-dev -- bash -lc "findmnt | grep /home/ubuntu/workspace"
 ### 预期
 
 - `start` 秒级完成(输出 `VM 已在 Running,start 改为只重挂/重起隧道` 或类似)
-- findmnt 仍输出两条 mount
+- findmnt 仍输出两条 mount(test1 + alias2)
 
 ---
 
 ## 测试 4:参数冲突校验(必跑,最快)
 
-**目的**:确认互斥参数组合立刻报错,不进 launch。
+**目的**:确认非法参数组合立刻 throw,不进 launch。
 
-### 步骤(两条都应立刻 throw)
+### 步骤(每条都应立刻 throw)
 
 ```powershell
 # (a) -NoRootWorkspace 和 -WorkspaceHost 不能同时用
@@ -139,11 +139,23 @@ multipass exec claude-dev -- bash -lc "findmnt | grep /home/ubuntu/workspace"
 
 # (b) 普通 start 加 -ExtraMounts 会触发嵌套挂载
 .\launch.ps1 start -ExtraMounts D:\code\test1
+
+# (c) -ExtraMounts 的宿主目录不存在
+.\launch.ps1 start -ExtraMounts "D:\nonexistent-dir-xyz"
+
+# (d) -ExtraMounts 的 vmSubdir 含 '..' 逃逸
+.\launch.ps1 start -ExtraMounts "D:\code\test1=..\.."
+
+# (e) -ExtraMounts 两个项映射到同一子目录
+.\launch.ps1 start -ExtraMounts "D:\code\test1","D:\code\test2=test1"
+
+# (f) -WorkspaceHost 目录不存在
+.\launch.ps1 start -WorkspaceHost "D:\nonexistent-ws"
 ```
 
 ### 预期
 
-两条都报 PowerShell throw,提示参数冲突 / 必须带 `-NoRootWorkspace`。**不进 launch**。
+六条都报 PowerShell throw,提示 `不能同时使用` / `请加 -NoRootWorkspace` / `宿主机目录不存在` / `不允许含 '..'` / `子目录名重复` / `-WorkspaceHost 必须是已存在的目录`。**不进 launch**。
 
 ---
 
@@ -174,9 +186,9 @@ multipass exec claude-dev -- bash -lc "which tailscale; findmnt | grep /home/ubu
 
 ---
 
-## 测试 6:cc-pocket 失败不阻断(可选)
+## 测试 6:cc-pocket 随 bundle 安装
 
-**目的**:验证 cc-pocket 装失败时,核心 VM(Node + Claude Code)仍可用。
+**目的**:验证 cc-pocket 已从 bundle 离线装好。cc-pocket 是 bundle 必需组件,不做在线降级/容错;缺失会导致 `launch.ps1 start` 直接报错。
 
 ### 步骤
 
@@ -189,10 +201,8 @@ multipass exec claude-dev -- bash -lc "systemctl --user status cc-pocket-daemon 
 
 ### 预期
 
-- `INSTALLED`(正常装上)
-- 或 `NOT_INSTALLED`(网络断/版本不兼容)但 `claude` 仍能跑 —— 这是设计上的容错
-
-**判断标准**:`command -v claude` 在 + claude 能启动 = 测试通过,不管 cc-pocket 是否装上。
+- `INSTALLED`(bundle 离线安装,`install-bundle.sh` 最后一步 `command -v cc-pocket-daemon` 强制)
+- 若 `NOT_INSTALLED`:说明 bundle 缺 cc-pocket 离线包,`launch.ps1 start` 会在启动前报错;先 `.\prepare-bundle.ps1` 补齐,再 `delete + start`。
 
 ---
 
@@ -202,7 +212,7 @@ multipass exec claude-dev -- bash -lc "systemctl --user status cc-pocket-daemon 
 
 | 现象 | 章节 |
 |---|---|
-| `multipass launch` 报 `Timed out waiting for instance launch` | §F(也可能是 launch.ps1 已修的旁路探测,VM 其实已就绪 → `multipass list` 看状态) |
+| `multipass launch` 报 `Timed out waiting for instance launch` | §F(launch 现在超时/失败直接 throw;先 `multipass list` 看是否已 Running,已 Running 就重跑 `start` 只重挂/重起隧道) |
 | `cloud-init status --wait` 超时 / 非零 | §B |
 | env 同步 `EMPTY` / `claude` 弹登录菜单 | §C |
 | Git Bash 报 `fatal error - add_item ... errno 1` | §D |

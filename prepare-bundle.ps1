@@ -25,7 +25,8 @@ bundle 内容(约 117MB):
 [CmdletBinding()]
 param(
     [switch]$Force,
-    [string]$NodeVersion
+    [string]$NodeVersion,
+    [string]$CcPocketVersion
 )
 
 $ErrorActionPreference = 'Stop'
@@ -106,9 +107,11 @@ function Invoke-NpmPack {
     param([string]$Pkg)
     Push-Location $bundleDir
     try {
-        # 用 cmd 执行避免 PowerShell 流处理 npm 的 stderr notice
+        # Start-Process 不能直接执行 npm.ps1;显式使用 npm.cmd,避免 Windows 报 "%1 is not a valid Win32 application"
+        $npmCmd = (Get-Command npm.cmd -ErrorAction SilentlyContinue).Source
+        if (-not $npmCmd) { throw "找不到 npm.cmd。请确认 Node.js/npm 已加入 PATH" }
         $tmpOut = Join-Path $env:TEMP "npm-pack-$([guid]::NewGuid().ToString('N')).txt"
-        $proc = Start-Process -FilePath 'npm' -ArgumentList @('pack', $Pkg) `
+        $proc = Start-Process -FilePath $npmCmd -ArgumentList @('pack', $Pkg) `
             -NoNewWindow -Wait -PassThru `
             -RedirectStandardOutput $tmpOut -RedirectStandardError "$tmpOut.err"
         if ($proc.ExitCode -ne 0) {
@@ -169,7 +172,40 @@ if ((-not $Force) -and $existingLinux) {
     }
 }
 
-# ---------- 3. 状态汇总 ----------
+# ---------- 3. cc-pocket Linux x86_64 ----------
+Write-Step "查 cc-pocket daemon 版本..."
+if (-not $CcPocketVersion) {
+    # Avoid GitHub API rate limits: releases/latest redirects to the tag without API access.
+    try {
+        $request = [System.Net.HttpWebRequest]::Create('https://github.com/heypandax/cc-pocket/releases/latest')
+        $request.AllowAutoRedirect = $false
+        $response = $request.GetResponse()
+        $location = $response.Headers['Location']
+        $response.Close()
+        if ($location -notmatch '/tag/([^/?#]+)') { throw '无法从 releases/latest 重定向地址解析版本' }
+        $CcPocketVersion = $Matches[1]
+    } catch {
+        throw "无法解析 cc-pocket 最新版本（已避开 GitHub API 限流）: $($_.Exception.Message)。可用 -CcPocketVersion vX.Y.Z 显式指定版本"
+    }
+}
+$ccVersion = $CcPocketVersion.TrimStart('v')
+$ccAsset = "cc-pocket-daemon-$ccVersion-linux-x86_64.tar.gz"
+$ccDir = Join-Path $bundleDir 'cc-pocket'
+$ccPath = Join-Path $ccDir $ccAsset
+if ($Force -and (Test-Path $ccDir)) { Remove-Item $ccDir -Recurse -Force }
+if (-not (Test-Path $ccPath)) {
+    New-Item -ItemType Directory -Path $ccDir -Force | Out-Null
+    $ccUrl = "https://github.com/heypandax/cc-pocket/releases/download/v$ccVersion/$ccAsset"
+    Write-Step "下载 $ccUrl..."
+    Invoke-WebRequest -Uri $ccUrl -OutFile $ccPath -TimeoutSec 600 -UseBasicParsing
+}
+$ccShaPath = Join-Path $ccDir 'SHA256SUMS'
+if (-not (Test-Path $ccShaPath)) {
+    Invoke-WebRequest -Uri "https://github.com/heypandax/cc-pocket/releases/download/v$ccVersion/SHA256SUMS" -OutFile $ccShaPath -TimeoutSec 60 -UseBasicParsing
+}
+Write-Ok "cc-pocket bundle 就绪:$ccAsset"
+
+# ---------- 4. 状态汇总 ----------
 Write-Step "bundle 状态:"
 $nodeOk   = Get-ChildItem $bundleDir -Filter 'node-v*-linux-x64.tar.xz' -ErrorAction SilentlyContinue | Select-Object -First 1
 $wrapOk   = Get-ChildItem $bundleDir -Filter $wrapperPattern -ErrorAction SilentlyContinue |
@@ -180,14 +216,15 @@ if ($nodeOk) { Write-Ok "Node:               $($nodeOk.Name)" }   else { Write-E
 if ($wrapOk) { Write-Ok "Claude wrapper:     $($wrapOk.Name)" }   else { Write-Err "Claude wrapper:     缺" }
 if ($linuxOk) { Write-Ok "Claude Linux 二进制:$($linuxOk.Name)" } else { Write-Err "Claude Linux 二进制:缺" }
 
-if ($nodeOk -and $wrapOk -and $linuxOk) {
-    $totalMB = [math]::Round(($nodeOk.Length + $wrapOk.Length + $linuxOk.Length) / 1MB, 1)
-    Write-Host ""
-    Write-Host "bundle 就绪($totalMB MB)。" -ForegroundColor Green
-    Write-Host "下次 .\launch.ps1 start 会自动走离线模式,cloud-init 应 < 2 分钟(主要剩 cc-pocket 在线,失败不阻断)。" -ForegroundColor Green
+$ccOk = @(Get-ChildItem (Join-Path $bundleDir 'cc-pocket') -Filter 'cc-pocket-daemon-*-linux-x86_64.tar.gz' -ErrorAction SilentlyContinue).Count -gt 0
+if ($ccOk) { Write-Ok "cc-pocket:        已准备" } else { Write-Err "cc-pocket:        缺" }
+
+if ($nodeOk -and $wrapOk -and $linuxOk -and $ccOk) {
+    $totalMB = [math]::Round(($nodeOk.Length + $wrapOk.Length + $linuxOk.Length + (Get-ChildItem (Join-Path $bundleDir 'cc-pocket') -File | Measure-Object Length -Sum).Sum) / 1MB, 1)
+    Write-Host "bundle 就绪($totalMB MB,含 cc-pocket)。" -ForegroundColor Green
     exit 0
 } else {
     Write-Host ""
-    Write-Err "bundle 不完整,launch.ps1 会降级为在线模式(网络慢时 cloud-init 13+ 分钟)"
+    Write-Err "bundle 不完整,launch.ps1 start 会直接报错(项目不支持在线降级)。补齐全后再启动"
     exit 1
 }
