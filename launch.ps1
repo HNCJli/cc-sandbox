@@ -269,27 +269,54 @@ function Invoke-Multipass {
     }
 }
 
+# 等待 VM 内 multipass-sshfs snap 装好。
+# 首次 multipass mount 会 lazy-install 这个 snap;snapd change 异步进行,紧接着的第二个 mount
+# 会撞 "install-snap change in progress" 必失败。snap list multipass-sshfs exit 0 = 装好,普通用户可读。
+# 选 snap list 而非解析 snap changes:输出稳定、不依赖 changes 表列布局。
+function Wait-SshfsSnapReady {
+    param([int]$TimeoutSec = 180)
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        $r = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'snap', 'list', 'multipass-sshfs') -TimeoutSec 15
+        if ($r.ExitCode -eq 0 -and -not $r.TimedOut) { return $true }
+        Start-Sleep -Seconds 10
+    }
+    return $false
+}
+
 # mount 专用 wrapper:成功/已挂载/失败重试,失败时只警告不抛错(保持原版"继续"语义)
 # "already mounted" 视为幂等成功,不触发 Reset
+# snap-install-in-progress 自救:stderr 匹配 snap 冲突时轮询 snap list 等装完再重试 mount
 function Try-Mount {
     param(
         [Parameter(Mandatory)] [string[]]$MountArgs,
         [Parameter(Mandatory)] [string]$Description,
         [string]$FailureHint = ""
     )
-    foreach ($attempt in 1..2) {
+    # 最多 4 轮:第 1 轮正常 mount;后续轮可能是 snap 装完后的重试
+    $snapProgressPattern = "install-snap.*in progress|Failed to install 'multipass-sshfs'|enabling mount support"
+    $lastStderr = ""
+    foreach ($attempt in 1..4) {
         # 120s:慢网络 + cloud-init 在跑时,multipass 跟 VM 的 SSH 通道会慢;60s 实测不够
         $r = Invoke-Multipass -ArgumentList $MountArgs -TimeoutSec 120
         if ($r.ExitCode -eq 0 -or $r.Stderr -match 'already mounted|already.*mount') {
             Write-Ok "$Description 完成"
             return $true
         }
-        if ($attempt -eq 1) {
-            # 瞬态失败重试一次;仍失败就如实报错,不再自动重置 daemon(1.14.1 稳定,真卡死走 troubleshooting.md §F)
-            Write-Warn "$Description 失败/超时,稍后重试一次..."
+        $lastStderr = if ($r.Stderr) { $r.Stderr.Trim() } else { "" }
+        # snap install 进行中:轮询 snap list 等装完,然后下一轮重试 mount
+        if ($lastStderr -match $snapProgressPattern) {
+            Write-Warn "$Description 等待 multipass-sshfs snap 安装完成..."
+            if (Wait-SshfsSnapReady -TimeoutSec 180) {
+                continue   # snap 装好了,回去再 mount 一次
+            }
+            # snap 等待超时,落到下面失败提示
+            break
         }
+        # 普通瞬态失败:短暂等待后下一轮重试(不自动重置 daemon,1.14.1 稳定;真卡死走 troubleshooting.md §F)
+        if ($attempt -lt 4) { Start-Sleep -Seconds 5 }
     }
-    $err = if ($r.Stderr) { $r.Stderr.Trim() } else { "daemon 重置失败或超时" }
+    $err = if ($lastStderr) { $lastStderr } else { "daemon 重置失败或超时" }
     Write-Warn "$Description 失败:$err $FailureHint"
     return $false
 }
@@ -581,20 +608,21 @@ function Mount-ExtraMounts {
         #    它仍对应当前 mounts.txt/-ExtraMounts 声明的宿主源目录
         $null = Invoke-Multipass -ArgumentList @('umount', "${vmName}:${target}") -TimeoutSec 30
 
-        # 3) 挂载后再用 findmnt 验证一次 —— 这才是成功的唯一判据
-        # 120s:跟 Try-Mount 一致(VM 忙时 SSH 通道慢)
-        $mt = Invoke-Multipass -ArgumentList @('mount', $src, "${vmName}:${target}") -TimeoutSec 120
-        $ok = (Test-VMTargetMounted -Target $target)
-        if ($ok) {
-            Write-Ok "挂载 $src → $target 完成"
+        # 3) 走 Try-Mount:自带 snap-install-progress 自救(首个 mount 触发 lazy install
+        #    multipass-sshfs snap,后续 mount 撞 change in progress 时轮询等装完再重试)
+        #    + already-mounted 幂等 + 失败重试
+        $mounted = Try-Mount -MountArgs @('mount', $src, "${vmName}:${target}") `
+                             -Description "挂载 $src → $target" `
+                             -FailureHint "(重新运行 .\launch.ps1 start -NoRootWorkspace 会再次尝试清理并挂载)"
+
+        # 4) findmnt 双重确认:Try-Mount 报 OK 不代表真挂上(Multipass 偶尔报告 OK 但 findmnt 无)
+        if ($mounted -and (Test-VMTargetMounted -Target $target)) {
+            # Try-Mount 已打过 Write-Ok,不重复
         } else {
-            $err = if ($mt.Stderr) { $mt.Stderr.Trim() } else { "(无 stderr)" }
-            if ($err -match 'already mounted') {
-                Write-Warn "挂载 $src → $target 失败:multipass 记录卡死(already mounted 但实际未挂载)"
-                Write-Warn "  重新运行 .\launch.ps1 start -NoRootWorkspace 会再次尝试清理并挂载;若仍不行,先检查 daemon 状态再决定是否重建 VM"
-            } else {
-                Write-Warn "挂载 $src → $target 失败:$err"
+            if ($mounted) {
+                Write-Warn "挂载 $src → $target 异常:Try-Mount 返成功但 findmnt 未检测到挂载"
             }
+            # Try-Mount 失败时已 Write-Warn 过,这里不重复
             $allMounted = $false
         }
     }
