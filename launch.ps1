@@ -282,18 +282,32 @@ function Test-VmExists {
     return 'unknown'
 }
 
-# 三态分发:exists 跑 $Action,absent 提示跳过,unknown 警告不动
-# Stop / Delete 共用,消除两处 switch 重复
-function Invoke-OnVmState {
+# stop / delete 共用:直接跑 multipass 命令,不做 Test-VmExists 预检
+# 预检路径在 daemon 慢时会触发 30s+ list 重试 + Reset-Daemon 级联;
+# 停/删 VM 没必要预先知道状态——multipass 自己会告诉我们 VM 在不在
+# daemon 卡死时不在这里自动重置(那是 §F 用户主动操作,需要 admin)
+function Invoke-VmActionGraceful {
     param(
-        [Parameter(Mandatory)] [scriptblock]$Action,
+        [Parameter(Mandatory)] [string[]]$MultipassArgs,
         [string]$AbsentMsg = "VM 不存在,跳过",
-        [string]$Verb = "操作"
+        [string]$DoneMsg,
+        [int]$TimeoutSec = 60
     )
-    switch (Test-VmExists) {
-        'exists'  { & $Action }
-        'absent'  { Write-Warn $AbsentMsg }
-        'unknown' { Write-Warn "VM 状态不确定(daemon 异常),不$Verb 避免误伤" }
+    $r = Invoke-Multipass -ArgumentList $MultipassArgs -TimeoutSec $TimeoutSec
+    if ($r.ExitCode -eq 0) {
+        if ($DoneMsg) { Write-Ok $DoneMsg }
+        return
+    }
+    $err = if ($r.Stderr) { $r.Stderr.Trim() } else { "" }
+    # "VM 不存在" 类错误:幂等视为已删/已停(实测字面量随版本/multipass 子命令有差异)
+    if ($err -match '(?:does not exist|not found|cannot be found|unknown instance|name.*not known)') {
+        Write-Warn $AbsentMsg
+        return
+    }
+    if ($r.TimedOut) {
+        Write-Warn "multipass $($MultipassArgs -join ' ') 超时(${TimeoutSec}s)。daemon 可能卡死,见 troubleshooting.md §F(管理员重启 Multipass 服务)"
+    } else {
+        Write-Warn "multipass $($MultipassArgs -join ' ') 失败 ExitCode=$($r.ExitCode)。stderr: $err"
     }
 }
 
@@ -760,10 +774,7 @@ function Stop-ClaudeDev {
     Write-Step "停隧道..."
     Stop-Tunnel
     Write-Step "停 VM..."
-    Invoke-OnVmState -Verb "停" -Action {
-        multipass stop $vmName
-        Write-Ok "VM 已停"
-    }
+    Invoke-VmActionGraceful -MultipassArgs @('stop', $vmName) -DoneMsg "VM 已停"
 }
 
 # ====== status ======
@@ -808,10 +819,7 @@ function Delete-ClaudeDev {
     Write-Step "清理隧道..."
     Stop-Tunnel
     Write-Step "删 VM..."
-    Invoke-OnVmState -Verb "删" -Action {
-        multipass delete --purge $vmName
-        Write-Ok "VM 已删除并清理"
-    }
+    Invoke-VmActionGraceful -MultipassArgs @('delete', '--purge', $vmName) -DoneMsg "VM 已删除并清理"
     Write-Host ""
     Write-Host "保留: workspace/、.ssh-key、.ssh-key.pub(下次 start 复用)" -ForegroundColor Green
 }
