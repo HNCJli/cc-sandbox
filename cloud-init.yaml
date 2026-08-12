@@ -157,9 +157,9 @@ runcmd:
   - chmod 600 /home/ubuntu/.ssh/authorized_keys
   - locale-gen C.UTF-8
   - update-locale LANG=C.UTF-8
-  # 第一阶段只配置基础交互环境；bundle 挂载和离线软件安装由 launch.ps1 后续执行
+  # 第一阶段只配置基础交互环境；bundle 传输和离线软件安装由 launch.ps1 后续执行
   - printf '%s\n' 'stage=4' 'package=1' 'package_name=Fish 配置完成' > /run/claude-dev/progress && printf '%s\n' 'event=Fish 配置完成' >> /run/claude-dev/events
   - printf '%s\n' 'stage=4' 'package=2' 'package_name=tmux 配置完成' > /run/claude-dev/progress && printf '%s\n' 'event=tmux 配置完成' >> /run/claude-dev/events
   - printf '%s\n' 'stage=4' 'package=3' 'package_name=SSH 配置完成' > /run/claude-dev/progress && printf '%s\n' 'event=SSH 配置完成' >> /run/claude-dev/events
   - printf '%s\n' 'stage=4' 'package=4' 'package_name=Claude 配置同步逻辑完成' > /run/claude-dev/progress && printf '%s\n' 'event=Claude 配置同步逻辑完成' >> /run/claude-dev/events
-  - printf '%s\n' 'event=基础 cloud-init 完成，等待 bundle 挂载' >> /run/claude-dev/events
+  - printf '%s\n' 'event=基础 cloud-init 完成，等待 bundle 传输' >> /run/claude-dev/events

@@ -45,7 +45,7 @@ multipass find                        # 应能列出 24.04 / noble 别名
 cloud-init status 等待超时(20 分钟),继续后续步骤验证
 ```
 
-**含义**:等待超时不直接说明 VM 创建失败或成功。`launch.ps1` 内部轮询 `cloud-init status`(上限 20 分钟),超时后脚本会继续后续步骤(挂载 bundle + 装软件 + 起隧道);若后续步骤真正失败会直接报错终止。先 `multipass list` 确认 VM 是否已 Running(cloud-init 5.x 偶发不返回完成信号),已 Running 就重跑 `start` 只重挂/重起隧道。
+**含义**:等待超时不直接说明 VM 创建失败或成功。`launch.ps1` 内部轮询 `cloud-init status`(上限 20 分钟),超时后脚本会继续后续步骤(传输 bundle + 装软件 + 起隧道);若后续步骤真正失败会直接报错终止。先 `multipass list` 确认 VM 是否已 Running(cloud-init 5.x 偶发不返回完成信号),已 Running 就重跑 `start` 只重传/重起隧道。
 
 **诊断**:
 ```powershell

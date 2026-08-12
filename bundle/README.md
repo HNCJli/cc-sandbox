@@ -25,7 +25,7 @@
 
 不用手动用。`.\launch.ps1 start` 启动时会检测 bundle/,**必须齐全才启动**(项目只走离线安装,不做在线降级):
 
-- **齐全** → launch 时挂载 `bundle/` → VM `/home/ubuntu/.bundle`,从本地装 Node + Claude Code + cc-pocket,**离线模式**,cloud-init < 2 分钟
+- **齐全** → launch 时通过 `multipass transfer -r` 把 `bundle/` 拷到 VM `/home/ubuntu/.bundle`,从本地装 Node + Claude Code + cc-pocket,**离线模式**,cloud-init < 2 分钟
 - **不齐** → `launch.ps1 start` 直接报错终止,先跑 `.\prepare-bundle.ps1` 补齐再启动
 
 bundle 准备好后,需要 `delete + start` 重建 VM 才生效(现有 VM 已经装过了)。

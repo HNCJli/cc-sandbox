@@ -661,7 +661,7 @@ function Start-ClaudeDev {
                         "--disk", "${diskGB}G",
                         "--cloud-init", $renderedPath,
                         "--timeout", "1200")
-        # 不在 multipass launch 阶段挂 bundle；先完成基础 cloud-init，再由后续流程挂载并安装。
+        # 不在 multipass launch 阶段传 bundle；先完成基础 cloud-init,再由后续流程 transfer 并安装。
         $launchArgs += $image
         # 不自动重置 daemon(1.14.1 稳定);launch 失败如实报错,见 troubleshooting.md §F
         # --timeout 1200 把 multipass CLI 自己的超时从默认 5 分钟拉到 20 分钟
@@ -683,27 +683,38 @@ function Start-ClaudeDev {
     # 等 cloud-init,同时在当前窗口显示安全阶段进度
     $cloudInitProgressStatus = Wait-CloudInitWithProgress -VmName $vmName
 
-    # cloud-init 阶段结束后只记录完成,整个 bundle/挂载/隧道流程结束时才显示 [6/6]
+    # cloud-init 阶段结束后只记录完成,整个 bundle/传输/隧道流程结束时才显示 [6/6]
     if ($cloudInitProgressStatus -eq 'done') {
         $cloudInitSnapshot = Show-CloudInitProgress -VmName $vmName
         Complete-CloudInitProgress -Progress $cloudInitSnapshot
     }
 
-    # 基础 cloud-init 完成后再挂载 bundle，避免首次 launch --mount 与 multipass-sshfs 时序冲突
-    Write-Step "挂载离线 bundle..."
+    # 基础 cloud-init 完成后再传 bundle:bundle 是 ~220MB 只读 tarball,不需要"实时挂载"。
+    # multipass mount 走 multipass-sshfs,新 VM 上 daemon 首次推 sshfs 二进制经常超 180s
+    # (实测 2026-08-12:cloud-init done、daemon 健康、mount 180s 仍未完成)。
+    # 改用 transfer -r 直接 SFTP 拷贝,绕开 sshfs 推送瓶颈。
+    Write-Step "传输离线 bundle 到 VM..."
     $bundleHost = Join-Path $scriptDir 'bundle'
-    $bundleMounted = Test-VMTargetMounted -Target '/home/ubuntu/.bundle'
-    if (-not $bundleMounted) {
-        $bundleMount = Invoke-Multipass -ArgumentList @('mount', $bundleHost, "${vmName}:/home/ubuntu/.bundle") -TimeoutSec 180
-        if ($bundleMount.TimedOut -or ($bundleMount.ExitCode -ne 0 -and $bundleMount.Stderr -notmatch 'already mounted')) {
-            throw "bundle 挂载失败，停止启动。$($bundleMount.Stderr)"
+    # 关键文件存在 = 已传过,跳过(幂等)。test -f 走 glob,bash -lc 展开
+    $bundleKeyFiles = 'test -f /home/ubuntu/.bundle/node-v*-linux-x64.tar.xz && test -f /home/ubuntu/.bundle/anthropic-ai-claude-code-linux-x64-*.tgz && test -f /home/ubuntu/.bundle/cc-pocket/cc-pocket-daemon-*-linux-x86_64.tar.gz'
+    $bundleCheck = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'bash', '-lc', $bundleKeyFiles) -TimeoutSec 30
+    if ($bundleCheck.TimedOut) { throw "bundle 关键文件检查超时,停止启动" }
+    if ($bundleCheck.ExitCode -ne 0) {
+        # transfer -r 在 dst 已存在时会拷成 dst/<src-name>/,先 rm -rf 保证干净
+        $null = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'sudo', 'rm', '-rf', '/home/ubuntu/.bundle') -TimeoutSec 30
+        # 600s:~220MB SFTP,慢网络给足余量
+        $bundleTransfer = Invoke-Multipass -ArgumentList @('transfer', '-r', $bundleHost, "${vmName}:/home/ubuntu/.bundle") -TimeoutSec 600
+        if ($bundleTransfer.TimedOut -or $bundleTransfer.ExitCode -ne 0) {
+            $err = if ($bundleTransfer.Stderr) { $bundleTransfer.Stderr.Trim() } else { '(无 stderr)' }
+            throw "bundle 传输失败，停止启动。$err"
         }
+        # 传输后再校验关键文件齐全
+        $recheck = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'bash', '-lc', $bundleKeyFiles) -TimeoutSec 30
+        if ($recheck.ExitCode -ne 0 -or $recheck.TimedOut) { throw "bundle 传输后关键文件不完整，停止启动" }
     }
-    $bundleCheck = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'bash', '-lc', 'test -f /home/ubuntu/.bundle/node-v*-linux-x64.tar.xz && test -f /home/ubuntu/.bundle/anthropic-ai-claude-code-linux-x64-*.tgz && test -f /home/ubuntu/.bundle/cc-pocket/cc-pocket-daemon-*-linux-x86_64.tar.gz') -TimeoutSec 30
-    if ($bundleCheck.ExitCode -ne 0 -or $bundleCheck.TimedOut) { throw "bundle 挂载后关键文件不完整，停止启动" }
-    Write-Ok "bundle 已挂载且关键文件齐全"
+    Write-Ok "bundle 已传输且关键文件齐全"
 
-    # bundle 挂载后:先探测是否已装好(已装好跳过重装,省 ~1 分钟),否则执行本地安装
+    # bundle 传输后:先探测是否已装好(已装好跳过重装,省 ~1 分钟),否则执行本地安装
     # 用 type -P(PATH-only)而非 command -v:profile 定义了 claude() 函数,登录 shell 下 command -v 会被函数遮蔽误报成功
     Write-Step "检查 Node.js / Claude Code / cc-pocket 是否已在 VM 内..."
     $probe = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'bash', '-lc', 'type -P node >/dev/null && type -P claude >/dev/null && type -P cc-pocket-daemon >/dev/null') -TimeoutSec 30
