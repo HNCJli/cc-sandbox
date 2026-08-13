@@ -436,23 +436,28 @@ function Render-CloudInit {
 
     $templatePath = Join-Path $scriptDir "cloud-init.yaml"
     $tmuxPath     = Join-Path $scriptDir "tmux.conf"
-    foreach ($p in @($templatePath, $tmuxPath)) {
+    $statuslinePath = Join-Path $scriptDir "statusline.sh"
+    foreach ($p in @($templatePath, $tmuxPath, $statuslinePath)) {
         if (-not (Test-Path $p)) { throw "缺文件: $p" }
     }
 
     $template = [System.IO.File]::ReadAllText($templatePath, [System.Text.Encoding]::UTF8)
     $tmuxRaw  = [System.IO.File]::ReadAllText($tmuxPath, [System.Text.Encoding]::UTF8)
+    $statuslineRaw = [System.IO.File]::ReadAllText($statuslinePath, [System.Text.Encoding]::UTF8)
 
     # YAML block scalar 缩进:cloud-init.yaml 占位符所在 content: | 块是 6 空格缩进
     $tmuxIndented = (($tmuxRaw -split "`r?`n") | ForEach-Object { "      " + $_ }) -join "`n"
     # 去掉末尾多余空行,避免 YAML 末尾混乱
     $tmuxIndented = $tmuxIndented.TrimEnd("`n")
+    $statuslineIndented = (($statuslineRaw -split "`r?\n") | ForEach-Object { "      " + $_ }) -join "`n"
+    $statuslineIndented = $statuslineIndented.TrimEnd("`n")
 
     $pubKeyPath = Join-Path $scriptDir ".ssh-key.pub"
     if (-not (Test-Path $pubKeyPath)) { throw ".ssh-key.pub 不存在,Start 流程漏了 keygen 步?" }
     $pubKey = ([System.IO.File]::ReadAllText($pubKeyPath, [System.Text.Encoding]::UTF8)).Trim()
 
     $rendered = $template.Replace('{{TMUX_CONF_PLACEHOLDER}}', $tmuxIndented)
+    $rendered = $rendered.Replace('{{STATUSLINE_PLACEHOLDER}}', $statuslineIndented)
     # SSH_PUBKEY 现在在 runcmd 的 echo "..." 里,不需要缩进
     $rendered = $rendered.Replace('{{SSH_PUBKEY_PLACEHOLDER}}', $pubKey)
 
@@ -497,6 +502,50 @@ function Test-VMTargetMounted {
     param([Parameter(Mandatory)] [string]$Target)
     $r = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'findmnt', '-n', $Target) -TimeoutSec 15
     return $r.ExitCode -eq 0 -and $r.Stdout -match [regex]::Escape($Target)
+}
+
+# 带短轮询的 Test-VMTargetMounted:堵 sshfs 挂载点 mountinfo 同步延迟窗口
+# (Try-Mount 报 OK 后,VM 内核更新 mountinfo 可能有秒级延迟,findmnt 立即查会落空)
+# 稳定时立即返回,只在延迟窗口轮询,默认 10s
+function Wait-VMTargetMounted {
+    param(
+        [Parameter(Mandatory)] [string]$Target,
+        [int]$TimeoutSec = 10,
+        [int]$IntervalSec = 2
+    )
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        if (Test-VMTargetMounted -Target $Target) { return $true }
+        Start-Sleep -Seconds $IntervalSec
+    }
+    return $false
+}
+
+# ====== .claude-host 硬 RO:bind + remount ro (内核层,不污染宿主) ======
+# 背景:multipass mount 不支持原生 RO(issue #4601),chmod 又会经 SFTP 传回宿主
+# 污染 ~/.claude。bind+remount ro 在 VM VFS 层做 RO,挡住包括 FUSE owner 在内的
+# 所有写(EROFS),且完全不外泄到宿主机。
+# 幂等:findmnt 检测 topmost mount 的 ro 选项;失败只警告不 throw(对齐 Try-Mount 语义)
+function Set-HostMountReadOnly {
+    param([Parameter(Mandatory)] [string]$Target)
+    # 1) 先确认 FUSE 挂载真活(短轮询,堵 sshfs mountinfo 同步延迟)
+    if (-not (Wait-VMTargetMounted -Target $Target -TimeoutSec 10)) {
+        Write-Warn "RO 设置跳过:$Target 未挂载(findmnt 10s 内无记录)"
+        return $false
+    }
+    # 2) 幂等检查:topmost mount 的 OPTIONS 已含 ro 就直接 OK
+    $ro = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'bash', '-lc',
+        "findmnt -n -o OPTIONS -T '$Target' 2>/dev/null | tr ',' '\n' | grep -qx ro") -TimeoutSec 15
+    if ($ro.ExitCode -eq 0) { Write-Ok "$Target 已是 RO"; return $true }
+    # 3) bind + remount,ro,bind:同路径 bind 是 stacked mount,kernel 看 topmost 的 flags
+    $script = "sudo mount --bind '$Target' '$Target' 2>/dev/null || true; sudo mount -o remount,ro,bind '$Target'"
+    $r = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'bash', '-lc', $script) -TimeoutSec 30
+    if ($r.ExitCode -ne 0 -or $r.TimedOut) {
+        Write-Warn "$Target RO 设置失败:$($r.Stderr) (RW 仍可用,继续)"
+        return $false
+    }
+    Write-Ok "$Target 已设为 RO"
+    return $true
 }
 
 # ====== ExtraMounts:来源(参数优先,否则读 mounts.txt) ======
@@ -616,11 +665,12 @@ function Mount-ExtraMounts {
                              -FailureHint "(重新运行 .\launch.ps1 start -NoRootWorkspace 会再次尝试清理并挂载)"
 
         # 4) findmnt 双重确认:Try-Mount 报 OK 不代表真挂上(Multipass 偶尔报告 OK 但 findmnt 无)
-        if ($mounted -and (Test-VMTargetMounted -Target $target)) {
+        #    sshfs 挂载点 mountinfo 同步有秒级延迟,这里短轮询 10s
+        if ($mounted -and (Wait-VMTargetMounted -Target $target -TimeoutSec 10)) {
             # Try-Mount 已打过 Write-Ok,不重复
         } else {
             if ($mounted) {
-                Write-Warn "挂载 $src → $target 异常:Try-Mount 返成功但 findmnt 未检测到挂载"
+                Write-Warn "挂载 $src → $target 异常:Try-Mount 返成功但 findmnt 10s 内未检测到挂载"
             }
             # Try-Mount 失败时已 Write-Warn 过,这里不重复
             $allMounted = $false
@@ -768,6 +818,9 @@ function Start-ClaudeDev {
     $null = Try-Mount -MountArgs @('mount', $hostClaude, "${vmName}:${mountClaudeHost}") `
                       -Description "挂载 .claude" `
                       -FailureHint "(cc-switch env 同步会失效,继续)"
+    # 内核层硬 RO:防 VM 里 Claude Code 误写污染宿主机 ~/.claude
+    # 失败只 warning(RW 仍可用),不阻塞后续流程
+    $null = Set-HostMountReadOnly -Target $mountClaudeHost
 
     # 挂载 workspace —— 两种模式互斥
     if ($NoRootWorkspace) {

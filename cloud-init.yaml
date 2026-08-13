@@ -1,6 +1,6 @@
 #cloud-init
 # 由 launch.ps1 渲染后再喂给 multipass launch --cloud-init
-# 占位符(渲染时由 launch.ps1 替换):TMUX_CONF_PLACEHOLDER, SSH_PUBKEY_PLACEHOLDER, TAILSCALE_BLOCK, APT_MIRROR_PLACEHOLDER
+# 占位符(渲染时由 launch.ps1 替换):TMUX_CONF_PLACEHOLDER, SSH_PUBKEY_PLACEHOLDER, TAILSCALE_BLOCK, APT_MIRROR_PLACEHOLDER, STATUSLINE_PLACEHOLDER
 # (注意:不要在注释里重复出现占位符字面量,会被 .Replace 误伤)
 
 hostname: claude-dev
@@ -37,7 +37,7 @@ write_files:
       export LC_ALL=C.UTF-8
 
   # settings.json 同步: 宿主机挂载的 .claude-host → VM 实际 .claude/(VM 内只读)
-  # 白名单过滤:只提取 LLM 相关 env,其余字段(statusLine/mcpServers/hooks/permissions 等)不进 VM,VM 用 Claude Code 默认
+  # 白名单过滤:提取 LLM 相关 env + 注入 VM 本地 statusLine;mcpServers/hooks/permissions 等一律丢弃
   # 注:此文件不依赖 06-local-bin.sh 的 PATH(claude 是 npm 全局,不是 ~/.local/bin)
   - path: /etc/profile.d/05-claude-config.sh
     permissions: '0644'
@@ -47,7 +47,7 @@ write_files:
         [ -f "$HOME/.claude-host/settings.json" ] || return 0
         mkdir -p "$HOME/.claude"
         # 白名单:只保留 env(LLM token/base_url/模型等);非 JSON 时退化为空 env,保证能启动
-        { jq '{env: (.env // {})}' "$HOME/.claude-host/settings.json" 2>/dev/null || echo '{"env":{}}'; } \
+        { jq '{env: (.env // {}), statusLine: {type: "command", command: "/home/ubuntu/.claude-statusline.sh", padding: 0}}' "$HOME/.claude-host/settings.json" 2>/dev/null || echo '{"env":{},"statusLine":{"type":"command","command":"/home/ubuntu/.claude-statusline.sh","padding":0}}'; } \
           > "$HOME/.claude/settings.json.tmp"
         # rm 绕过前次 chmod 444,再设 444 让 Claude Code 在 VM 里改不了
         rm -f "$HOME/.claude/settings.json"
@@ -93,8 +93,8 @@ write_files:
               return 0
           end
           mkdir -p "$HOME/.claude"
-          if not jq '{env: (.env // {})}' "$HOME/.claude-host/settings.json" > "$HOME/.claude/settings.json.tmp" 2>/dev/null
-              echo '{"env":{}}' > "$HOME/.claude/settings.json.tmp"
+          if not jq '{env: (.env // {}), statusLine: {type: "command", command: "/home/ubuntu/.claude-statusline.sh", padding: 0}}' "$HOME/.claude-host/settings.json" > "$HOME/.claude/settings.json.tmp" 2>/dev/null
+              echo '{"env":{},"statusLine":{"type":"command","command":"/home/ubuntu/.claude-statusline.sh","padding":0}}' > "$HOME/.claude/settings.json.tmp"
           end
           rm -f "$HOME/.claude/settings.json"
           mv "$HOME/.claude/settings.json.tmp" "$HOME/.claude/settings.json"
@@ -104,6 +104,15 @@ write_files:
           sync_claude_config
           command claude $argv
       end
+
+  # Claude Code statusline 脚本(bash,launch.ps1 渲染进来)
+  # sync_claude_config 会把 statusLine 字段写进 ~/.claude/settings.json 指向此文件
+  - path: /home/ubuntu/.claude-statusline.sh
+    defer: true
+    permissions: '0755'
+    owner: ubuntu:ubuntu
+    content: |
+{{STATUSLINE_PLACEHOLDER}}
 
   # tmux 配置(launch.ps1 把 tmux.conf 内容渲染进来)
   # defer: true —— 等默认 ubuntu 用户创建后再写,避免 owner 失败

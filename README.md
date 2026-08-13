@@ -37,7 +37,7 @@ Windows 宿主机
      ├─ Claude Code                    npm 全局装
      ├─ Fish + fzf + zoxide + tmux      交互 shell + TUI 修复
      ├─ ~/.claude/settings.json        只含 env(白名单),RO,Claude Code 改不了
-     ├─ ~/.claude-host/                ← 宿主机 ~/.claude 整目录挂载(VM 内 RO)
+     ├─ ~/.claude-host/                ← 宿主机 ~/.claude 整目录挂载(内核层硬 RO,bind+remount)
      ├─ ~/workspace                     ← 传统模式:./workspace/ 持久挂载;
      │                                   多目录模式(-NoRootWorkspace):VM 本地父目录
      │                                   + 各宿主目录挂到 ~/workspace/<子目录>
@@ -177,7 +177,7 @@ CPU / 内存 / 磁盘 / 镜像版本都参数化了,不用改源码:
 
 ### 改 Claude 配置
 
-宿主机用 cc-switch UI 切 provider / 改 `~/.claude/settings.json` 后,VM 会自动同步 **LLM 相关 env**(token / base_url / 模型映射)。同步是**白名单**:只提取 `env` 字段,statusLine / mcpServers / hooks / permissions 等一律不进 VM,其余走 Claude Code 默认配置。
+宿主机用 cc-switch UI 切 provider / 改 `~/.claude/settings.json` 后,VM 会自动同步 **LLM 相关 env**(token / base_url / 模型映射)。同步是**白名单**:只提取 `env` 字段,加上一个 VM 本地注入的 `statusLine`(指向 `~/.claude-statusline.sh`,显示模型/目录/分支/进度条/费用/时长);`mcpServers` / `hooks` / `permissions` 等一律不进 VM,走 Claude Code 默认配置。
 
 - VM 里每次敲 `claude` 前会自动重新同步,**同一 shell 内切 provider 后立即生效**
 - 新开 shell 也会同步一次(profile 脚本)
@@ -320,7 +320,7 @@ tailscale ip                   # 看 VM 拿到的 100.x.x.x 内网 IP
 multipass exec claude-dev -- curl -v http://127.0.0.1:15721/
 # connection refused → 隧道断了,restart
 
-# 3. settings.json 同步了吗(应只含 env,无 statusLine/mcpServers 等;含明文 token,别直接 cat)
+# 3. settings.json 同步了吗(应含 env + 本地 statusLine,无 mcpServers 等;含明文 token,别直接 cat)
 multipass exec claude-dev -- bash -lc "jq -e '.env | type == \"object\" and length > 0' ~/.claude/settings.json >/dev/null && echo 'env 同步 OK' || echo 'env 为空'"
 ```
 
