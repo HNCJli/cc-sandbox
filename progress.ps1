@@ -66,8 +66,12 @@ function Complete-BundleProgress {
 }
 
 function Complete-StartupProgress {
+    param([switch]$EnableTailscale)
     Show-ProgressStage -Number 5 -Title '处理可选组件'
-    if (-not $script:progressState['tailscale:skip']) {
+    if ($EnableTailscale) {
+        # 与收尾提示"已预装,未配对"对齐,别在同一输出里既 SKIP 又已预装
+        Write-Host '    OK  Tailscale 已随 cloud-init 预装(未配对)' -ForegroundColor Green
+    } elseif (-not $script:progressState['tailscale:skip']) {
         $script:progressState['tailscale:skip'] = $true
         Write-Host '    SKIP 未启用 Tailscale' -ForegroundColor DarkGray
     }

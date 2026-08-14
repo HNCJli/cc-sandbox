@@ -927,7 +927,7 @@ function Start-ClaudeDev {
     Write-Ok "隧道 PID $($proc.Id)"
 
     Write-Host ""
-    Complete-StartupProgress
+    Complete-StartupProgress -EnableTailscale:$EnableTailscale
     Write-Host "==== 完成 ====" -ForegroundColor Green
     Write-Host "进入 VM:    multipass shell $vmName"
     Write-Host "VM 里跑:    claude --dangerously-skip-permissions"
