@@ -285,21 +285,37 @@ function Wait-SshfsSnapReady {
 }
 
 # mount 专用 wrapper:成功/已挂载/失败重试,失败时只警告不抛错(保持原版"继续"语义)
-# "already mounted" 视为幂等成功,不触发 Reset
+# "already mounted" 视为幂等成功,不触发 Reset —— 但需 $VmTarget 配合 findmnt 二次验证
+#   (multipassd 重启后可能内部去重表残留:VM 内核 mount 已清但 daemon 仍认为已挂,
+#    mount 命令报 already-mounted 实际未挂。此时强制 umount 清表后重 mount)
 # snap-install-in-progress 自救:stderr 匹配 snap 冲突时轮询 snap list 等装完再重试 mount
 function Try-Mount {
     param(
         [Parameter(Mandatory)] [string[]]$MountArgs,
         [Parameter(Mandatory)] [string]$Description,
-        [string]$FailureHint = ""
+        [string]$FailureHint = "",
+        [string]$VmTarget = ""    # 可选:VM 内挂载点路径,用于 already-mounted 的 findmnt 二次验证
     )
-    # 最多 4 轮:第 1 轮正常 mount;后续轮可能是 snap 装完后的重试
+    # 最多 4 轮:第 1 轮正常 mount;后续轮可能是 snap 装完或状态错乱清理后的重试
     $snapProgressPattern = "install-snap.*in progress|Failed to install 'multipass-sshfs'|enabling mount support"
     $lastStderr = ""
     foreach ($attempt in 1..4) {
         # 120s:慢网络 + cloud-init 在跑时,multipass 跟 VM 的 SSH 通道会慢;60s 实测不够
         $r = Invoke-Multipass -ArgumentList $MountArgs -TimeoutSec 120
         if ($r.ExitCode -eq 0 -or $r.Stderr -match 'already mounted|already.*mount') {
+            # 防御 multipassd 状态错乱:只在 already-mounted 分支验证(exit 0 通常真挂上)
+            # findmnt 短轮询 10s 同时兜 sshfs mountinfo 同步延迟窗口
+            if ($VmTarget -and $r.Stderr -match 'already mounted|already.*mount') {
+                if (-not (Wait-VMTargetMounted -Target $VmTarget -TimeoutSec 10)) {
+                    # daemon 报已挂但 VM 内核无挂载点 → 强制 umount 清 daemon 残留表,下一轮重 mount
+                    Write-Warn "$Description daemon 报已挂但 VM 内未检测到,清理残留重挂..."
+                    $null = Invoke-Multipass -ArgumentList @('umount', "${vmName}:${VmTarget}") -TimeoutSec 30
+                    if ($attempt -lt 4) { Start-Sleep -Seconds 2; continue }
+                    # 第 4 轮还撞状态错乱,落到失败提示
+                    $lastStderr = "daemon 状态错乱:umount+mount 重试仍报 already-mounted 但 VM 内无挂载"
+                    break
+                }
+            }
             Write-Ok "$Description 完成"
             return $true
         }
@@ -662,7 +678,8 @@ function Mount-ExtraMounts {
         #    + already-mounted 幂等 + 失败重试
         $mounted = Try-Mount -MountArgs @('mount', $src, "${vmName}:${target}") `
                              -Description "挂载 $src → $target" `
-                             -FailureHint "(重新运行 .\launch.ps1 start -NoRootWorkspace 会再次尝试清理并挂载)"
+                             -FailureHint "(重新运行 .\launch.ps1 start -NoRootWorkspace 会再次尝试清理并挂载)" `
+                             -VmTarget $target
 
         # 4) findmnt 双重确认:Try-Mount 报 OK 不代表真挂上(Multipass 偶尔报告 OK 但 findmnt 无)
         #    sshfs 挂载点 mountinfo 同步有秒级延迟,这里短轮询 10s
@@ -817,7 +834,8 @@ function Start-ClaudeDev {
     if (-not (Test-Path $hostClaude)) { throw "$hostClaude 不存在,Claude Code 没装?" }
     $null = Try-Mount -MountArgs @('mount', $hostClaude, "${vmName}:${mountClaudeHost}") `
                       -Description "挂载 .claude" `
-                      -FailureHint "(cc-switch env 同步会失效,继续)"
+                      -FailureHint "(cc-switch env 同步会失效,继续)" `
+                      -VmTarget $mountClaudeHost
     # 内核层硬 RO:防 VM 里 Claude Code 误写污染宿主机 ~/.claude
     # 失败只 warning(RW 仍可用),不阻塞后续流程
     $null = Set-HostMountReadOnly -Target $mountClaudeHost
@@ -861,7 +879,8 @@ function Start-ClaudeDev {
         $null = Invoke-Multipass -ArgumentList @('umount', "${vmName}:${mountWorkspace}") -TimeoutSec 30
         $null = Try-Mount -MountArgs @('mount', $wsHost, "${vmName}:${mountWorkspace}") `
                           -Description "挂载 workspace" `
-                          -FailureHint "(中文路径 $wsHost 若挂不上,见 README 故障排查;继续)"
+                          -FailureHint "(中文路径 $wsHost 若挂不上,见 README 故障排查;继续)" `
+                          -VmTarget $mountWorkspace
     }
 
     # ExtraMounts:仅在 -NoRootWorkspace 下挂到 VM 本地 workspace 子目录
