@@ -8,6 +8,10 @@
 .PARAMETER NodeVersion
     指定 Node 版本(如 "v20.20.2")。不指定时自动取最新 20.x LTS。
 
+.PARAMETER CcPocketVersion
+    指定 cc-pocket 版本(如 "v1.7.6")。不指定时优先从已缓存文件名取版本(更新用 -Force),
+    无缓存时在线解析最新版(避开 GitHub API 限流)。
+
 .EXAMPLE
     .\prepare-bundle.ps1              # 缺啥下啥
     .\prepare-bundle.ps1 -Force       # 重新下载所有

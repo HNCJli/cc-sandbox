@@ -1,7 +1,7 @@
 #cloud-init
 # 由 launch.ps1 渲染后再喂给 multipass launch --cloud-init
 # 占位符(渲染时由 launch.ps1 替换):TMUX_CONF_PLACEHOLDER, SSH_PUBKEY_PLACEHOLDER, TAILSCALE_BLOCK, APT_MIRROR_PLACEHOLDER, STATUSLINE_PLACEHOLDER
-# (注意:不要在注释里重复出现占位符字面量,会被 .Replace 误伤)
+# (注意:注释里别出现 {{XXX}} 形式的占位符,launch.ps1 的 .Replace 会连注释一起替换;不带花括号的裸名安全)
 
 hostname: claude-dev
 users:
@@ -27,7 +27,7 @@ package_update: false
 
 
 write_files:
-  # TUI 渲染修复(替代原 Dockerfile 第 43 行的 /etc/bash.bashrc 写入)
+  # TUI 渲染修复
   - path: /etc/profile.d/00-tui-env.sh
     permissions: '0644'
     content: |

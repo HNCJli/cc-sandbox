@@ -19,7 +19,7 @@ param(
     [Parameter()]
     [string]$WorkspaceHost = "",
 
-    # 可调配置(也可改 $script: 默认值)
+    # 可调配置(默认值就在此 param() 块)
     [string]$Image     = "noble",       # Ubuntu 24.04 LTS
     [int]$Cpus         = 4,
     [int]$MemoryGB     = 8,
@@ -53,7 +53,7 @@ Set-Location $scriptDir
 $vmName         = "claude-dev"
 $mountClaudeHost = "/home/ubuntu/.claude-host"          # 宿主机 ~/.claude 挂到 VM 哪里
 $mountWorkspace = "/home/ubuntu/workspace"              # ./workspace 挂到 VM 哪里(放在 ~/ 下)
-# 可调项见 param() 块:$Image / $Cpus / $MemoryGB / $DiskGB / $CcSwitchPort
+# 可调项见 param() 块:$Image / $Cpus / $MemoryGB / $DiskGB / $CcSwitchPort / $AptMirror
 
 # ====== 日志 helpers ======
 function Write-Step($msg) { Write-Host "==> $msg" -ForegroundColor Cyan }
@@ -285,7 +285,7 @@ function Wait-SshfsSnapReady {
 }
 
 # mount 专用 wrapper:成功/已挂载/失败重试,失败时只警告不抛错(保持原版"继续"语义)
-# "already mounted" 视为幂等成功,不触发 Reset —— 但需 $VmTarget 配合 findmnt 二次验证
+# "already mounted" 视为幂等成功 —— 但需 $VmTarget 配合 findmnt 二次验证
 #   (multipassd 重启后可能内部去重表残留:VM 内核 mount 已清但 daemon 仍认为已挂,
 #    mount 命令报 already-mounted 实际未挂。此时强制 umount 清表后重 mount)
 # snap-install-in-progress 自救:stderr 匹配 snap 冲突时轮询 snap list 等装完再重试 mount
@@ -332,7 +332,7 @@ function Try-Mount {
         # 普通瞬态失败:短暂等待后下一轮重试(不自动重置 daemon,1.14.1 稳定;真卡死走 troubleshooting.md §F)
         if ($attempt -lt 4) { Start-Sleep -Seconds 5 }
     }
-    $err = if ($lastStderr) { $lastStderr } else { "daemon 重置失败或超时" }
+    $err = if ($lastStderr) { $lastStderr } else { "(超时或无错误输出)" }
     Write-Warn "$Description 失败:$err $FailureHint"
     return $false
 }
@@ -368,7 +368,8 @@ function Assert-Prerequisites {
 }
 
 # 一次 list 调用拿 VM 的 Name/State/IPv4,找不到返回 $null
-# Test-VmExists / Get-VmState / Get-VmIp 共用,避免 CSV 解析三处重复
+# Get-VmState / Get-VmIp 共用此处(容错:list 失败返 $null)
+# Test-VmExists 故意不走这里:list 失败必须 throw(fail-fast),不能与"VM 不存在"混淆
 function Get-VmRecord {
     $r = Invoke-Multipass -ArgumentList @('list', '--format', 'csv') -TimeoutSec 15
     if ($r.ExitCode -ne 0) { return $null }
@@ -740,7 +741,7 @@ function Start-ClaudeDev {
     $script:progressState = @{}
     $script:cloudInitShown = $script:progressState
     $script:launchProgressShown = @{}
-    Write-Step "启动 VM(首次 3-5 分钟,cloud-init 装 Node + Claude Code)..."
+    Write-Step "启动 VM(若新建:基础 cloud-init + 离线 bundle 装 Node/Claude Code;已存在则只重挂/重起隧道)..."
     # 二态判断:list 失败已在 Test-VmExists 里 throw(fail-fast),绝不猜 absent 跑去 launch 新的
     if (Test-VmExists) {
         $state = Get-VmState
@@ -799,7 +800,6 @@ function Start-ClaudeDev {
     # 改用 transfer -r 直接 SFTP 拷贝,绕开 sshfs 推送瓶颈。
     Write-Step "传输离线 bundle 到 VM..."
     $bundleHost = Join-Path $scriptDir 'bundle'
-    # 关键文件存在 = 已传过,跳过(幂等)。test -f 走 glob,bash -lc 展开
     # 关键文件存在 = 已传过,跳过(幂等)。4 个必需文件全查;wrapper 用 [0-9] 排除 linux-x64 变体(同 install-bundle.sh 的 glob)
     $bundleKeyFiles = 'test -f /home/ubuntu/.bundle/node-v*-linux-x64.tar.xz && test -f /home/ubuntu/.bundle/anthropic-ai-claude-code-[0-9]*.tgz && test -f /home/ubuntu/.bundle/anthropic-ai-claude-code-linux-x64-*.tgz && test -f /home/ubuntu/.bundle/cc-pocket/cc-pocket-daemon-*-linux-x86_64.tar.gz'
     $bundleCheck = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'bash', '-lc', $bundleKeyFiles) -TimeoutSec 30

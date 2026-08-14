@@ -42,6 +42,18 @@ netstat -ano | findstr 15721   # cc-switch 应 LISTENING 在 127.0.0.1:15721
 
 多目录模式必须 `-NoRootWorkspace`(Windows 上 Multipass 对嵌套挂载支持不稳);`-WorkspaceHost` 只在传统模式(单根)下用。
 
+**`start` 全部参数**(权威来源:`launch.ps1` 顶部 `param()` 块):
+
+| 参数 | 默认 | 备注 |
+|---|---|---|
+| `-WorkspaceHost <目录>` | `""` → `./workspace` | 单根模式自定义宿主 workspace 源;须已存在,与 `-NoRootWorkspace` 互斥 |
+| `-Image` / `-Cpus` / `-MemoryGB` / `-DiskGB` | `noble` / `4` / `8` / `30` | VM 资源,仅 `delete + start` 重建时生效 |
+| `-CcSwitchPort <端口>` | `15721` | 宿主机 cc-switch 端口(反向隧道目标),每次启动生效 |
+| `-AptMirror <域名>` | `mirrors.aliyun.com` | VM 内 APT 镜像,渲染进 cloud-init,仅重建生效 |
+| `-EnableTailscale` | 关 | 预装 Tailscale,渲染进 cloud-init,仅重建生效 |
+| `-ExtraMounts <列表>` | 空 | `"路径"` / `"路径=子目录"`;须配 `-NoRootWorkspace`;优先于 mounts.txt |
+| `-NoRootWorkspace` | 关 | 多目录模式:跳过根 workspace 挂载 |
+
 首次 3–15 分钟(下载 Ubuntu 镜像 + cloud-init 装基础包;Node/Claude 从 bundle 离线装)。脚本会自动:开 privileged-mounts → 创建/唤醒 VM → 挂 `~/.claude`(RO)和 workspace → 起 SSH 反向隧道。
 
 > **后台跑法**:首次因为要下载镜像,建议后台运行 + 轮询输出文件看进度,别干等。

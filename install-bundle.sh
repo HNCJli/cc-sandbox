@@ -6,7 +6,6 @@ printf '%s\n' 'event=stage:3|[3/6] 安装 Node.js' >> /run/claude-dev/events
 tar -xJf /home/ubuntu/.bundle/node-v*-linux-x64.tar.xz -C /usr/local --strip-components=1
 printf '%s\n' 'stage=4' 'package=0' 'package_name=Claude Code' > /run/claude-dev/progress
 printf '%s\n' 'event=stage:4|[4/6] 安装 Claude Code' >> /run/claude-dev/events
-printf '%s\n' 'event=stage:3|[3/6] 安装 Claude Code' >> /run/claude-dev/events
 npm install -g /home/ubuntu/.bundle/anthropic-ai-claude-code-linux-x64-*.tgz
 npm install -g /home/ubuntu/.bundle/anthropic-ai-claude-code-[0-9]*.tgz
 cc_asset=$(find /home/ubuntu/.bundle/cc-pocket -maxdepth 1 -name 'cc-pocket-daemon-*-linux-x86_64.tar.gz' | head -1)
