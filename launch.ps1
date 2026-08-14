@@ -708,6 +708,11 @@ function Start-ClaudeDev {
     if (-not $NoRootWorkspace -and $extraItems.Count -gt 0) {
         throw "检测到 mounts.txt 或 -ExtraMounts,但普通 start 会产生嵌套挂载。请加 -NoRootWorkspace,或移除额外挂载后再用普通 start"
     }
+    # -WorkspaceHost 校验也属 fail-fast:若放在挂载段(Stop-Tunnel 之后)才 throw,
+    # 参数错误会先杀掉活隧道再退出,留下"隧道已死"的状态
+    if ($WorkspaceHost -and -not (Test-Path $WorkspaceHost -PathType Container)) {
+        throw "-WorkspaceHost 必须是已存在的目录: $WorkspaceHost"
+    }
     $resolvedExtraMounts = if ($extraItems.Count -gt 0) { Resolve-ExtraMounts -Items $extraItems } else { @() }
 
     # 隧道复用/清理:start 幂等可反复跑。停旧隧道(后面会重起)
@@ -866,10 +871,7 @@ function Start-ClaudeDev {
     } else {
         Write-Step "挂载 workspace → VM $mountWorkspace..."
         if ($WorkspaceHost) {
-            # 用户显式指定宿主机 workspace 目录:必须已存在,不自动创建
-            if (-not (Test-Path $WorkspaceHost -PathType Container)) {
-                throw "-WorkspaceHost 必须是已存在的目录: $WorkspaceHost"
-            }
+            # 用户显式指定宿主机 workspace 目录(存在性已在开头 fail-fast 校验过,不自动创建)
             $wsHost = (Resolve-Path $WorkspaceHost).Path
             Write-Step "使用自定义 workspace 源: $wsHost"
         } else {
