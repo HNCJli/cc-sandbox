@@ -21,9 +21,9 @@ param(
 
     # 可调配置(也可改 $script: 默认值)
     [string]$Image     = "noble",       # Ubuntu 24.04 LTS
-    [int]$Cpus         = 2,
-    [int]$MemoryGB     = 4,
-    [int]$DiskGB       = 20,
+    [int]$Cpus         = 4,
+    [int]$MemoryGB     = 8,
+    [int]$DiskGB       = 30,
     [int]$CcSwitchPort = 15721,         # cc-switch 在宿主机监听的端口
 
     [string]$AptMirror = "mirrors.aliyun.com", # VM 初始化时使用的 Ubuntu APT 镜像
@@ -782,6 +782,10 @@ function Start-ClaudeDev {
     if ($cloudInitProgressStatus -eq 'done') {
         $cloudInitSnapshot = Show-CloudInitProgress -VmName $vmName
         Complete-CloudInitProgress -Progress $cloudInitSnapshot
+    } elseif ($cloudInitProgressStatus -eq 'error') {
+        # error 不中断(基础包缺失不一定全致命,后续 bundle 安装会再验证),但必须显式提醒,
+        # 否则真因(APT 源挂了)会被"bundle 本地安装失败"误导
+        Write-Warn "cloud-init 结束状态: error(常见是 APT 镜像不可达、基础包装失败)。若后续 bundle 安装报错,先查 'multipass exec $vmName -- cloud-init status --long' 和 /var/log/cloud-init-output.log"
     }
 
     # 基础 cloud-init 完成后再传 bundle:bundle 是 ~220MB 只读 tarball,不需要"实时挂载"。
@@ -791,7 +795,8 @@ function Start-ClaudeDev {
     Write-Step "传输离线 bundle 到 VM..."
     $bundleHost = Join-Path $scriptDir 'bundle'
     # 关键文件存在 = 已传过,跳过(幂等)。test -f 走 glob,bash -lc 展开
-    $bundleKeyFiles = 'test -f /home/ubuntu/.bundle/node-v*-linux-x64.tar.xz && test -f /home/ubuntu/.bundle/anthropic-ai-claude-code-linux-x64-*.tgz && test -f /home/ubuntu/.bundle/cc-pocket/cc-pocket-daemon-*-linux-x86_64.tar.gz'
+    # 关键文件存在 = 已传过,跳过(幂等)。4 个必需文件全查;wrapper 用 [0-9] 排除 linux-x64 变体(同 install-bundle.sh 的 glob)
+    $bundleKeyFiles = 'test -f /home/ubuntu/.bundle/node-v*-linux-x64.tar.xz && test -f /home/ubuntu/.bundle/anthropic-ai-claude-code-[0-9]*.tgz && test -f /home/ubuntu/.bundle/anthropic-ai-claude-code-linux-x64-*.tgz && test -f /home/ubuntu/.bundle/cc-pocket/cc-pocket-daemon-*-linux-x86_64.tar.gz'
     $bundleCheck = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'bash', '-lc', $bundleKeyFiles) -TimeoutSec 30
     if ($bundleCheck.TimedOut) { throw "bundle 关键文件检查超时,停止启动" }
     if ($bundleCheck.ExitCode -ne 0) {
@@ -906,7 +911,12 @@ function Start-ClaudeDev {
         "-o", "ExitOnForwardFailure=yes",
         "ubuntu@$vmIp"
     )
-    $proc = Start-Process -FilePath ssh -ArgumentList $tunnelArgs -PassThru -WindowStyle Hidden
+    # PS 5.1 的 Start-Process 对 ArgumentList 只按空格拼接、不加引号:
+    # $keyPath/$knownHosts 含空格时(用户名带空格的 TEMP、含空格的项目路径)参数会被撕断,手工加引号
+    $tunnelArgsQuoted = ($tunnelArgs | ForEach-Object {
+        if ($_ -match '[\s"]') { '"' + ($_ -replace '"','\"') + '"' } else { $_ }
+    }) -join ' '
+    $proc = Start-Process -FilePath ssh -ArgumentList $tunnelArgsQuoted -PassThru -WindowStyle Hidden
     Start-Sleep -Milliseconds 800
     if ($proc.HasExited) {
         throw "SSH 隧道秒退,ExitCode=$($proc.ExitCode)。可能是 VM sshd 没起或 key 没注入"
@@ -962,8 +972,10 @@ function Show-Status {
 
     Write-Step "VM 内 cc-switch 端口探测"
     if ((Get-VmState) -eq "Running") {
+        # curl -w 连不上时也会打 000 且退出非零,`|| echo 000` 会再补一个 → 输出可能是 000000,
+        # 用前缀匹配判失败,避免把探测失败误报成"隧道通了"
         $code = & multipass exec $vmName -- bash -c "curl -sS -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:$ccSwitchPort/ 2>/dev/null || echo 000"
-        if ($code -eq "000") {
+        if ($code -match '^000') {
             Write-Warn "VM 里 curl 127.0.0.1:$ccSwitchPort = $code (隧道可能没通)"
         } else {
             Write-Ok "VM 里 curl 127.0.0.1:$ccSwitchPort 返回 HTTP $code (隧道通了)"

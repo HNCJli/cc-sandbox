@@ -13,7 +13,7 @@
     .\prepare-bundle.ps1 -Force       # 重新下载所有
     .\prepare-bundle.ps1 -NodeVersion v20.20.2  # 指定版本
 
-bundle 内容(约 117MB):
+bundle 内容(约 220MB,含 cc-pocket):
   - node-vXX.X.X-linux-x64.tar.xz          Node 20 LTS Linux 二进制 (~25MB)
   - anthropic-ai-claude-code-X.X.X.tgz     Claude Code wrapper 包 (~25KB)
   - anthropic-ai-claude-code-linux-x64-X.X.X.tgz  Claude Code Linux 真二进制 (~93MB)
@@ -174,6 +174,15 @@ if ((-not $Force) -and $existingLinux) {
 
 # ---------- 3. cc-pocket Linux x86_64 ----------
 Write-Step "查 cc-pocket daemon 版本..."
+# 非 -Force 且已有缓存:版本直接取文件名(缺啥下啥;探测 GitHub 会把全缓存场景变成强制联网)
+if (-not $CcPocketVersion -and -not $Force) {
+    $cachedAsset = Get-ChildItem (Join-Path $bundleDir 'cc-pocket') -Filter 'cc-pocket-daemon-*-linux-x86_64.tar.gz' -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($cachedAsset -and $cachedAsset.Name -match '^cc-pocket-daemon-(.+)-linux-x86_64\.tar\.gz$') {
+        $CcPocketVersion = $Matches[1]
+        Write-Ok "cc-pocket 已缓存,版本取自文件名: v$CcPocketVersion(更新用 -Force)"
+    }
+}
 if (-not $CcPocketVersion) {
     # Avoid GitHub API rate limits: releases/latest redirects to the tag without API access.
     try {
@@ -200,9 +209,33 @@ if (-not (Test-Path $ccPath)) {
     Invoke-WebRequest -Uri $ccUrl -OutFile $ccPath -TimeoutSec 600 -UseBasicParsing
 }
 $ccShaPath = Join-Path $ccDir 'SHA256SUMS'
-if (-not (Test-Path $ccShaPath)) {
-    Invoke-WebRequest -Uri "https://github.com/heypandax/cc-pocket/releases/download/v$ccVersion/SHA256SUMS" -OutFile $ccShaPath -TimeoutSec 60 -UseBasicParsing
+# 从 sums 文件里取该 tarball 的期望哈希(兼容 * 二进制模式前缀),无文件/无条目返 $null
+function Get-ExpectedCcHash {
+    param([string]$SumsPath, [string]$Asset)
+    if (-not (Test-Path $SumsPath)) { return $null }
+    foreach ($line in (Get-Content $SumsPath)) {
+        if ($line -match "^\s*([0-9a-fA-F]{64})\s+\*?\s*$([regex]::Escape($Asset))\s*$") { return $Matches[1].ToLower() }
+    }
+    return $null
 }
+# 校验 tarball 完整性(root 解压进 VM 的三方二进制,必须验)。
+# 缓存优先:本地 sums 有条目且哈希匹配 → 离线通过;本地缺文件/缺条目(版本更新后旧 sums 没新条目)
+# → 联网重下 sums;本地有条目但哈希不符 = tarball 坏,直接删文件退出,不联网(sums 是权威基准)
+$expectedHash = Get-ExpectedCcHash -SumsPath $ccShaPath -Asset $ccAsset
+$actualHash = (Get-FileHash $ccPath -Algorithm SHA256).Hash.ToLower()
+if (-not $expectedHash) {
+    Invoke-WebRequest -Uri "https://github.com/heypandax/cc-pocket/releases/download/v$ccVersion/SHA256SUMS" -OutFile $ccShaPath -TimeoutSec 60 -UseBasicParsing
+    $expectedHash = Get-ExpectedCcHash -SumsPath $ccShaPath -Asset $ccAsset
+    if (-not $expectedHash) { Write-Err "SHA256SUMS 里找不到 $ccAsset 的条目"; exit 1 }
+}
+if ($expectedHash -ne $actualHash) {
+    Write-Err "cc-pocket SHA256 校验失败: $ccAsset"
+    Write-Err "  期望 $expectedHash"
+    Write-Err "  实际 $actualHash(已删坏文件,重跑本脚本会重新下载)"
+    Remove-Item $ccPath -Force -ErrorAction SilentlyContinue
+    exit 1
+}
+Write-Ok "cc-pocket SHA256 校验通过"
 Write-Ok "cc-pocket bundle 就绪:$ccAsset"
 
 # ---------- 4. 状态汇总 ----------

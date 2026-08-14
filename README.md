@@ -18,7 +18,7 @@
 git clone <repo-url>
 cd claude-code-multipass
 .\prepare-bundle.ps1         # 必须:准备离线 bundle(~220MB 含 cc-pocket,首次慢,后续 delete+start 提速 10+ 分钟)
-.\launch.ps1 start           # 首次 3-15 分钟(镜像下载 + bundle 离线装软件)
+.\launch.ps1 start           # 首次 3–15 分钟(镜像下载 + bundle 离线装软件)
 multipass shell claude-dev
 # VM 内:
 claude --dangerously-skip-permissions
@@ -51,6 +51,11 @@ Windows 宿主机
 | `cloud-init.yaml` | VM 装机脚本模板(含占位符,launch.ps1 渲染后喂给 multipass) |
 | `launch.ps1` | VM 生命周期管理(start / stop / restart / status / delete) + 隧道保活 |
 | `tmux.conf` | tmux 配置,cloud-init 渲染时注入 VM |
+| `prepare-bundle.ps1` | 准备离线 bundle(Node + Claude Code + cc-pocket,含 SHA256 校验) |
+| `install-bundle.sh` | VM 内从 bundle 离线装 Node/Claude Code/cc-pocket + 注册自启服务 |
+| `progress.ps1` | 启动/cloud-init 进度显示(launch.ps1 引入) |
+| `statusline.sh` | VM 内 Claude Code statusLine,cloud-init 渲染时注入 VM |
+| `mounts.example.txt` | 多目录挂载配置示例(复制为本地 `mounts.txt`) |
 | `workspace/` | 工作目录,挂到 VM `~/workspace`,VM 重建不丢(首次 start 自动创建) |
 
 ## 前置
@@ -75,7 +80,7 @@ multipass version     # 应为 1.14.1,勿升 1.16.x
 Windows 10+ 通常自带。验证:
 ```powershell
 ssh -V
-ssh-keygen -h    # 任意输出即可
+Get-Command ssh-keygen   # 能列出路径即可
 ```
 
 若缺:设置 → 应用 → 可选功能 → 添加功能 → OpenSSH 客户端。
@@ -98,7 +103,7 @@ netstat -ano | findstr 15721
 .\launch.ps1 start
 ```
 
-首次 3–5 分钟(bundle 离线装 Node + Claude Code)。完成后自动:
+首次 3–15 分钟(主要花在 Ubuntu 镜像下载;软件走 bundle 离线装)。完成后自动:
 1. 开启 Multipass privileged-mounts(首次会触发 multipassd 重启,正常现象)
 2. 创建/唤醒 VM
 3. 挂载 `~/.claude` → VM `/home/ubuntu/.claude-host`(RO)

@@ -42,7 +42,7 @@ netstat -ano | findstr 15721   # cc-switch 应 LISTENING 在 127.0.0.1:15721
 
 多目录模式必须 `-NoRootWorkspace`(Windows 上 Multipass 对嵌套挂载支持不稳);`-WorkspaceHost` 只在传统模式(单根)下用。
 
-首次 3–5 分钟(下载 Ubuntu 镜像 + cloud-init 装基础包;Node/Claude 从 bundle 离线装)。脚本会自动:开 privileged-mounts → 创建/唤醒 VM → 挂 `~/.claude`(RO)和 workspace → 起 SSH 反向隧道。
+首次 3–15 分钟(下载 Ubuntu 镜像 + cloud-init 装基础包;Node/Claude 从 bundle 离线装)。脚本会自动:开 privileged-mounts → 创建/唤醒 VM → 挂 `~/.claude`(RO)和 workspace → 起 SSH 反向隧道。
 
 > **后台跑法**:首次因为要下载镜像,建议后台运行 + 轮询输出文件看进度,别干等。
 
