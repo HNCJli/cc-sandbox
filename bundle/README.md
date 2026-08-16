@@ -2,6 +2,8 @@
 
 这个目录存 cloud-init 离线安装用的本地包,**让 VM 创建不依赖网络下载**。
 
+慢网络下在线装 Node + Claude Code 要 10–15 分钟,反复 `delete + start` 浪费时间;离线 bundle 把 Node 20 LTS + Claude Code + cc-pocket 预下载到本地,launch 时直接挂进 VM 装,cloud-init 压到 < 2 分钟。
+
 ## 内容(约 220 MB,含 cc-pocket)
 
 | 文件 | 大小 | 说明 |

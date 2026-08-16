@@ -62,7 +62,7 @@ multipass exec claude-dev -- sudo tail -n 80 /var/log/cloud-init-output.log
 multipass exec claude-dev -- bash -lc "node -v; command -v claude; command -v fish"
 ```
 
-> **cloud-init 太慢(>10 分钟)?** 项目只走离线安装,先跑 `.\prepare-bundle.ps1` 准备离线 bundle(~220MB 含 cc-pocket,一次性),之后 `delete + start` 走离线模式,cloud-init < 2 分钟。bundle 不齐 `launch.ps1 start` 会直接报错。详见 README「离线 bundle」。
+> **cloud-init 太慢(>10 分钟)?** 项目只走离线安装,先跑 `.\prepare-bundle.ps1` 准备离线 bundle(~220MB 含 cc-pocket,一次性),之后 `delete + start` 走离线模式,cloud-init < 2 分钟。bundle 不齐 `launch.ps1 start` 会直接报错。详见 `bundle/README.md`。
 
 ---
 

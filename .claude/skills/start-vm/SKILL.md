@@ -111,7 +111,7 @@ systemctl --user enable --now cc-pocket-daemon
 ```
 之后配对即可。配对一次后 daemon 由 systemd 用户服务托管,VM 重启自动起(linger 已开)。手机 App 从 [cc-pocket 项目](https://github.com/heypandax/cc-pocket) README 列出的商店下载。
 
-跨网络用 cc-pocket(手机 4G 遥控)?家里 VM 重建时加 `-EnableTailscale` 预装(`.\launch.ps1 start -EnableTailscale`),进 VM `sudo tailscale up` 配对后即可。见 README 的 Tailscale 章节。**公司场景别开**(会被软件审计识别)。
+cc-pocket 已支持任意网络遥控,不需要 Tailscale。要跨网络直连 VM 上跑的服务(如 VM 中启动的 web,用 `100.x.x.x:端口` 访问)?家里 VM 重建时加 `-EnableTailscale` 预装(`.\launch.ps1 start -EnableTailscale`),进 VM `sudo tailscale up` 配对后即可。见 `docs/optional-features.md`。**公司场景别开**(会被软件审计识别)。
 
 ## 常用子命令
 
@@ -134,7 +134,7 @@ systemctl --user enable --now cc-pocket-daemon
 | VM 里 env 检查是 `EMPTY`,或 `claude` 弹登录菜单 | §C 宿主机 .claude 权限锁死,env 同步为空 |
 | `bash: *** fatal error - add_item ... errno 1` | §D Git Bash spawn bug(与 VM 无关) |
 | SSH 隧道秒退 / cc-switch 端口探测 000 | §E 隧道;ExitCode 255 + `UNPROTECTED PRIVATE KEY FILE` 见 §E.1 |
-| 挂载失败 / 非 ASCII 路径 | 见项目 README「挂载失败」 |
+| 挂载失败 / 非 ASCII 路径 | 见项目 docs/troubleshooting.md |
 
 **注意**:§A(镜像源)和 §C(权限)这两类问题**不是每台机器都有**——只在遇到对应报错时才处理,别在正常机器上预防性乱改全局设置或文件权限。
 

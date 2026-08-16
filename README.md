@@ -58,6 +58,18 @@ Windows 宿主机
 | `mounts.example.txt` | 多目录挂载配置示例(复制为本地 `mounts.txt`) |
 | `workspace/` | 工作目录,挂到 VM `~/workspace`,VM 重建不丢(首次 start 自动创建) |
 
+## 延伸文档
+
+| 文档 | 内容 |
+|---|---|
+| [docs/mounts.md](docs/mounts.md) | 多目录挂载(`-NoRootWorkspace` / `-ExtraMounts` / `mounts.txt`)、junction 汇聚多个工作目录 |
+| [docs/parameters.md](docs/parameters.md) | `start` 全部参数与默认值 |
+| [docs/vm-daily.md](docs/vm-daily.md) | 外部 SSH 进 VM(IDE 集成)、Fish、tmux 快捷键 |
+| [docs/optional-features.md](docs/optional-features.md) | 可选:VM 内装 Docker、Tailscale 跨网络直连 VM 服务(如 VM 里启动的 web) |
+| [docs/troubleshooting.md](docs/troubleshooting.md) | 故障排查:隧道 / 挂载 / cloud-init |
+| [bundle/README.md](bundle/README.md) | 离线 bundle:准备、更新、失败诊断 |
+| [docs/plans/clipboard-image-bridge.md](docs/plans/clipboard-image-bridge.md) | **未实施方案**:Windows 剪贴板图片桥接进 VM 的设计记录 |
+
 ## 前置
 
 ### 1. Multipass(推荐/实测 1.14.1,**勿升 1.16.x**)
@@ -118,28 +130,7 @@ netstat -ano | findstr 15721
 
 VM 里仍挂到 `~/workspace`(位置不变)。换目录时直接再 `start` 一次即可,无需 `restart`。
 
-### 多目录挂载(挂多个 workspace 子目录)
-
-需要同时挂多个宿主机目录到 VM 时,用 `-NoRootWorkspace` + `-ExtraMounts`(或本地 `mounts.txt`):
-
-```powershell
-.\launch.ps1 start -NoRootWorkspace -ExtraMounts "D:\code\repo1","E:\proj\repo2=alias2"
-```
-
-每项格式 `HostPath` 或 `HostPath=vmSubdir`;简写时子目录名取宿主目录最后一级。VM 内挂成 `~/workspace/<子目录>`。
-
-也可在项目根目录建本地 `mounts.txt`(基于 `mounts.example.txt` 复制,每行一项,`#` 起始为注释),`-ExtraMounts` 未传时自动读它:
-
-```text
-D:\code\repo1
-E:\proj\repo2=alias2
-```
-
-`mounts.txt` 是本地配置(`.gitignore` 忽略)。
-
-> **为什么必须 `-NoRootWorkspace`**:Windows 上 Multipass 对嵌套挂载(把目录挂到另一个已挂载目录内部)支持不稳,曾出现挂载失败甚至卡死。根 `~/workspace` 默认挂着 `./workspace`,此时再往 `~/workspace/xxx` 挂会踩到这个问题。`-NoRootWorkspace` 跳过根挂载,让 `~/workspace` 变回 VM 本地目录,子目录挂载便不再嵌套。
->
-> 多目录模式下,`~/workspace` 是 VM 本地目录,**`delete` VM 时会丢**(子目录里的内容跟着没了)。子目录里别放原始代码,源码留在宿主机目录。
+要同时挂多个目录?用多目录模式(`-NoRootWorkspace` + `mounts.txt`),见 [docs/mounts.md](docs/mounts.md)。全部启动参数见 [docs/parameters.md](docs/parameters.md)。
 
 ### 进 VM
 
@@ -152,6 +143,8 @@ VM 内:
 claude --dangerously-skip-permissions   # 启动 Claude Code,最大权限
 tmux new -s work                        # tmux 会话
 ```
+
+交互 shell 是 Fish,常用快捷键与外部 SSH 见 [docs/vm-daily.md](docs/vm-daily.md)。
 
 ### 其他子命令
 
@@ -167,30 +160,6 @@ tmux new -s work                        # tmux 会话
 直接 `.\launch.ps1 start`。脚本会自动清理上次留下的死隧道进程(`.tunnel.pid` 里写的 PID 在重启后已失效),重起一条新的。VM 自己会被 Multipass 唤醒。
 
 唯一注意:cc-switch 不一定开机自启,如果 `start` 时它没跑,VM 里 Claude Code 会连不上 LLM —— 手动开一下 cc-switch 即可。
-
-### 临时换配置
-
-`start` 全部参数(权威来源:`launch.ps1` 顶部 `param()` 块):
-
-| 参数 | 默认 | 说明 |
-|---|---|---|
-| `-WorkspaceHost <目录>` | `""` → `./workspace` | 单根模式自定义宿主 workspace 目录(须已存在,不自动创建;与 `-NoRootWorkspace` 互斥) |
-| `-Image <镜像>` | `noble` | Ubuntu 镜像(24.04 LTS) |
-| `-Cpus <n>` | `4` | VM CPU 核数 |
-| `-MemoryGB <n>` | `8` | VM 内存(GB) |
-| `-DiskGB <n>` | `30` | VM 磁盘(GB) |
-| `-CcSwitchPort <端口>` | `15721` | 宿主机 cc-switch 端口(反向隧道目标) |
-| `-AptMirror <域名>` | `mirrors.aliyun.com` | VM 内 APT 镜像(渲染进 cloud-init) |
-| `-EnableTailscale` | 关 | 预装 Tailscale(见「跨网络访问 VM」) |
-| `-ExtraMounts <列表>` | 空 | `"路径"` / `"路径=子目录"`,挂到 `~/workspace/<子目录>`;须配 `-NoRootWorkspace`;优先于 mounts.txt |
-| `-NoRootWorkspace` | 关 | 多目录挂载模式(见「多目录挂载」) |
-
-```powershell
-.\launch.ps1 start -MemoryGB 16 -Cpus 8   # 临时给大点(需重建生效)
-.\launch.ps1 start -Image noble           # 指定镜像版本(默认 noble / 24.04)
-```
-
-> `-Image / -Cpus / -MemoryGB / -DiskGB / -AptMirror / -EnableTailscale` 都是**建 VM 时**生效(传给 `multipass launch` / 渲染进 cloud-init);VM 已存在时 `start` 只重挂/重起隧道,改这些参数不会动现有 VM——要生效得 `delete + start` 重建。`-CcSwitchPort` 每次启动都生效。
 
 ## 配置管理
 
@@ -214,182 +183,7 @@ VM 里 `~/.claude/settings.json` 是 `chmod 444`,**Claude Code 在 VM 里改不�
 
 ### 改 launch.ps1 默认参数
 
-CPU / 内存 / 磁盘 / 镜像 / cc-switch 端口 / APT 镜像等都参数化了,见 `launch.ps1` 顶部 `param()` 块默认值。临时改用命令行参数(见上文「临时换配置」),想永久改默认值就编辑 `param()` 块。
-
-## SSH 进 VM(IDE 集成 / 外部 SSH 客户端)
-
-VM 默认通过 `multipass shell` 进,不用密码。若要外部 SSH(如 VSCode Remote-SSH):
-
-`~/.ssh/config` 加:
-```
-Host claude-dev
-    HostName <VM IP>            # multipass info claude-dev 看 IPv4
-    User ubuntu
-    IdentityFile <项目路径>/.ssh-key
-    StrictHostKeyChecking no
-```
-
-VM IP 在 stop/start 后可能变,需更新。持久的 `multipass shell` 不受影响。
-
-## VM 交互 shell:Fish
-
-VM 默认交互 shell 是 **Fish**(配 fzf + zoxide)。`multipass shell claude-dev` 进去就是 fish 提示符:
-
-- **灰色历史建议**:边敲边显示匹配的历史命令,`→` 或 `Ctrl+F` 接受
-- **`Tab` 补全** / **`Ctrl+R`** 模糊搜历史(fzf)
-- **`z <关键词>`** 智能跳转目录(zoxide,基于使用频率)
-- 临时需要 bash 敲 `bash`;`.sh` 脚本和 cloud-init 仍走 bash
-
-每次敲 `claude` 前,fish 和 bash 一样会自动重新同步 cc-switch env(读 `~/.claude-host`,jq 过滤,写 `~/.claude/settings.json` chmod 444)。
-
-## 离线 bundle(慢网络/迭代快)
-
-慢网络下在线装 Node + Claude Code 要 10–15 分钟,反复 `delete + start` 浪费时间。**离线 bundle** 把 Node 20 LTS + Claude Code + cc-pocket 预下载到本地,launch 时直接挂进 VM 装,cloud-init 压到 < 2 分钟。
-
-### 准备
-
-```powershell
-.\prepare-bundle.ps1              # 缺啥下啥,首次约 220 MB(含 cc-pocket,慢网络可能 5-10 分钟)
-# 之后:
-.\launch.ps1 delete               # 清旧 VM(旧 VM 已装过,不重建用不上新 bundle)
-.\launch.ps1 start                # 新 VM 走离线模式,< 2 分钟完成 cloud-init
-```
-
-`launch.ps1 start` 会检测 bundle/,**必须齐全才启动**:不齐直接报错(项目只走离线安装,不做在线降级),先跑 `.\prepare-bundle.ps1` 补齐。已建好的 VM 重跑 `start` 同样要求 bundle 齐全。
-
-### 更新
-
-`@anthropic-ai/claude-code` 发新版或想升 Node 版本:
-
-```powershell
-.\prepare-bundle.ps1 -Force       # 重下最新
-.\launch.ps1 delete
-.\launch.ps1 start
-```
-
-### 内容
-
-| 文件 | 大小 | 用途 |
-|---|---|---|
-| `node-vXX.X.X-linux-x64.tar.xz` | ~25 MB | Node 20 LTS Linux 二进制(含 npm/npx) |
-| `anthropic-ai-claude-code-X.X.X.tgz` | ~25 KB | Claude Code wrapper 包 |
-| `anthropic-ai-claude-code-linux-x64-X.X.X.tgz` | ~93 MB | Claude Code Linux 真二进制 |
-| `cc-pocket/cc-pocket-daemon-X.X.X-linux-x86_64.tar.gz` | ~105 MB | cc-pocket 手机遥控(自带 JRE) |
-
-> `@anthropic-ai/claude-code` 是 wrapper 包,真二进制在平台特定的 `@anthropic-ai/claude-code-linux-x64`。两个都要 bundle,wrapper postinstall 才能把二进制装到位。
-
-bundle 不进 git(只 `bundle/README.md` 进),只本地存。详见 [`bundle/README.md`](bundle/README.md)。
-
-## 可选:VM 内装 Docker
-
-VM 已经是 Ubuntu,直接 `apt install` 就行,不用重建:
-
-```bash
-# 进 VM 后
-sudo apt-get update && sudo apt-get install -y docker.io
-sudo usermod -aG docker ubuntu     # 然后退出重进 shell 让组生效
-sudo systemctl enable --now docker
-```
-
-## 可选:跨网络访问 VM(Tailscale)
-
-家里跨网络(手机 4G、外面咖啡店)想直连 VM 时,加 `-EnableTailscale` 预装:
-
-```powershell
-.\launch.ps1 delete                # cloud-init 只在 launch 时跑,改预装必须重建 VM
-.\launch.ps1 start -EnableTailscale
-```
-
-VM 起来后,**进 VM 手动配对**(cloud-init 阶段没法弹浏览器):
-```bash
-sudo tailscale up              # 弹 URL,浏览器登录同一个 tailscale 账号
-tailscale ip                   # 看 VM 拿到的 100.x.x.x 内网 IP
-```
-
-手机/其他设备登同一个 tailscale 账号后,就能用那个 100.x.x.x IP SSH / 直连 VM 上任意服务。
-
-**⚠️ 公司场景千万别开**:
-- `-EnableTailscale` 会真的把 tailscale 包装进 VM
-- 即使不 `tailscale up` 没有出站流量,公司软件审计(SCCM 类)能扫到包已装
-- 公司禁远控/打洞软件时,这会被识别为违规
-- 公司场景用 `.\launch.ps1 start`(不带 `-EnableTailscale`),完全不碰
-
-**关于 cc-pocket(核心场景)**:宿主机实测过 —— 装 tailscale + 配对后,手机用 4G 流量能通过 cc-pocket 连到本机 Claude Code。VM 里同理:**装 `-EnableTailscale` + 配对后,手机跨网络也能用 cc-pocket 遥控 VM 里的 Claude Code**。这是本功能的主要动机,不是顺带的 SSH/直连能力。
-
-## tmux 快捷键
-
-| 操作 | 快捷键 / 命令 |
-|---|---|
-| 新建会话 | `tmux new -s <名字>` |
-| 退到后台(detach) | `Ctrl+B` 松开,再按 `D`(Shift) |
-| 重新连回 | `tmux a` 或 `tmux a -t <名字>` |
-| 列出会话 | `tmux ls`(没会话时报 `error connecting to ...` 是正常提示,不是 bug) |
-| 不依赖快捷键的退出 | 在 tmux 内的 shell 敲 `tmux detach-client` |
-
-## 故障排查
-
-### VM 里 Claude Code 报连不上 LLM / cc-switch
-
-```powershell
-# 1. 隧道在不在?
-.\launch.ps1 status                    # 看 "SSH 反向隧道" 段 + "VM 内 cc-switch 端口探测"
-                                       # 返回 HTTP 404 = 通(根路径不响应但服务在);000 = 隧道断
-
-# 2. VM 里手动 curl
-multipass exec claude-dev -- curl -v http://127.0.0.1:15721/
-# connection refused → 隧道断了,restart
-
-# 3. settings.json 同步了吗(应含 env + 本地 statusLine,无 mcpServers 等;含明文 token,别直接 cat)
-multipass exec claude-dev -- bash -lc "jq -e '.env | type == \"object\" and length > 0' ~/.claude/settings.json >/dev/null && echo 'env 同步 OK' || echo 'env 为空'"
-```
-
-### 隧道进程死了
-
-```powershell
-.\launch.ps1 restart                   # 重拉一切
-# 或只重起隧道(不重启 VM):
-Stop-Process -Id (Get-Content .tunnel.pid) -Force
-Remove-Item .tunnel.pid
-.\launch.ps1 start                     # 检测到 VM 在 Running 会跳过 launch,只重挂/重起隧道
-```
-
-### 挂载失败 / Multipass 报 "Mounts are disabled"
-
-Windows 上 Multipass 默认可能禁用 privileged-mounts。`launch.ps1 start` 首次会自动开启(`multipass set local.privileged-mounts=true`),若失败手动执行一次即可。
-
-### 挂载失败(非 ASCII 路径)
-
-如果 Windows 账号名或项目路径含中文等非 ASCII 字符,`multipass mount` 在 Windows 上支持不稳。
-
-**workspace 挂不上**的备选:
-1. 把项目挪到 ASCII 路径(如 `C:\dev\claude-vm\`),重新 `.\launch.ps1 start`
-2. 或在 ASCII 路径建 Windows junction 指向真实路径:
-   ```powershell
-   New-Item -ItemType Junction -Path C:\dev\workspace -Target "<项目实际路径>\workspace"
-   ```
-   然后 `.\launch.ps1 start -WorkspaceHost C:\dev\workspace` 用 junction 路径启动
-
-**`~/.claude` 挂不上**:用 junction:
-```powershell
-New-Item -ItemType Junction -Path C:\dev\claude-config -Target "$env:USERPROFILE\.claude"
-# 编辑 launch.ps1 把 $hostClaude 改成 C:\dev\claude-config
-```
-
-### cloud-init 没跑完
-
-```powershell
-multipass exec claude-dev -- cloud-init status --long    # 看详细
-multipass exec claude-dev -- sudo cat /var/log/cloud-init-output.log
-```
-
-### 想完全重来
-
-```powershell
-.\launch.ps1 delete
-.\launch.ps1 start
-```
-
-`.ssh-key`、`workspace/` 不会删,会复用。
+CPU / 内存 / 磁盘 / 镜像 / cc-switch 端口 / APT 镜像等都参数化了。临时改用命令行参数(完整参数表见 [docs/parameters.md](docs/parameters.md)),想永久改默认值就编辑 `launch.ps1` 顶部 `param()` 块。
 
 ## 备注
 
@@ -397,7 +191,7 @@ multipass exec claude-dev -- sudo cat /var/log/cloud-init-output.log
 - VM 行为:`multipass stop` 后不会自动起,需手动 `.\launch.ps1 start`
 - VM 里改 `~/.claude/settings.json` 会被 chmod 444 挡住;真要改就改宿主机的
 - cc-switch 端口(默认 15721)若变了,用 `-CcSwitchPort` 参数或改 `launch.ps1` 的 `param()` 块默认值
-- 资源占用:默认 2 CPU / 4G 内存 / 20G 盘,内存吃紧时 `-MemoryGB 8` 临时调大
+- 资源占用:默认 4 CPU / 8G 内存 / 30G 盘,调整见 [docs/parameters.md](docs/parameters.md)(改资源配置需 `delete + start` 重建生效)
 
 ## License
 

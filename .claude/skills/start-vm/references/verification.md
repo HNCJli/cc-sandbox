@@ -161,7 +161,7 @@ multipass exec claude-dev -- bash -lc "findmnt | grep /home/ubuntu/workspace"
 
 ## 测试 5:Tailscale 回归(可选)
 
-**目的**:验证 `-EnableTailscale` 仍能装上 tailscale(只在用 cc-pocket 跨网络遥控时才需要)。
+**目的**:验证 `-EnableTailscale` 仍能装上 tailscale。用途:跨网络直连 VM 上跑的服务(如通过 `100.x.x.x:端口` 访问 VM 里启动的 web);cc-pocket 已支持任意网络遥控,不依赖 tailscale。
 
 ### 步骤
 
@@ -219,4 +219,4 @@ multipass exec claude-dev -- bash -lc "systemctl --user status cc-pocket-daemon 
 | 隧道秒退 / 端口探测 000 | §E |
 | 隧道报 `ExitCode=255` + `UNPROTECTED PRIVATE KEY FILE` | §E.1 |
 | `multipass list` 卡住 / launch 卡在 SSH | §F |
-| cloud-init 太慢(>15 分钟) | 跑 `prepare-bundle.ps1` 走离线模式(见 README「离线 bundle」) |
+| cloud-init 太慢(>15 分钟) | 跑 `prepare-bundle.ps1` 走离线模式(见 `bundle/README.md`) |
