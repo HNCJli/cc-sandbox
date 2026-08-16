@@ -1,6 +1,6 @@
-# claude-dev-vm
+# cc-sandbox
 
-> **这是什么**:把 Claude Code 关进 Multipass Ubuntu VM 的 Windows 沙箱。VM 里可以放心跑 `--dangerously-skip-permissions` 最大权限,不污染宿主机;LLM env(token / base_url / 模型映射)从宿主机只读同步进 VM;workspace 双向挂载。
+> **这是什么**:把 Claude Code 关进 Multipass Ubuntu VM 的 Windows 沙箱,预装 Fish/fzf/zoxide/tmux/cc-pocket,开箱即用。VM 里可以放心跑 `--dangerously-skip-permissions` 最大权限,不污染宿主机;LLM env(token / base_url / 模型映射)从宿主机只读同步进 VM;workspace 双向挂载。
 >
 > **平台**:仅 **Windows 10/11**(Hyper-V 或 VirtualBox 后端)。Mac/Linux 不适用。
 
@@ -10,7 +10,7 @@
 
 ```powershell
 # 前提:已装 Multipass(推荐 1.14.1,勿升 1.16.x)
-git clone <repo-url> "$env:USERPROFILE\.claude\skills\claude-dev-vm"
+git clone https://github.com/HNCJli/cc-sandbox.git "$env:USERPROFILE\.claude\skills\claude-dev-vm"
 ```
 
 装好后对 Claude 说"启 VM / 起个 VM / 启动 claude-dev"即可,skill 入口见 [SKILL.md](SKILL.md)。
