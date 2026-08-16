@@ -7,5 +7,6 @@
 # D:\code\my-project
 # E:\work\another-repo=alias
 #
-# 启动:.\launch.ps1 start -NoRootWorkspace(自动读此文件,子目录挂到 ~/workspace 下)
-# mounts.txt 是本地配置,已在 .gitignore 中
+# 用法:复制为 状态目录\mounts.txt(默认 %USERPROFILE%\.claude-dev-vm\mounts.txt)后改成自己的路径,
+#       再 .\scripts\launch.ps1 start -NoRootWorkspace 自动读取,子目录挂到 ~/workspace 下
+# mounts.txt 放在状态目录(skill 包外),不进仓库

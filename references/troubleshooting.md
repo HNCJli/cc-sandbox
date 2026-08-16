@@ -1,14 +1,84 @@
-# start-vm 排障参考
+# 故障排查
+
+## 前置
+
+- Multipass:推荐/实测 **1.14.1**,勿升 1.16.x(其 daemon 在 Windows 不稳,list/launch 会卡死或超时)。
+- OpenSSH 客户端:Windows 10+ 通常自带(`ssh -V` 验证);缺则 设置 → 应用 → 可选功能 → 添加 OpenSSH 客户端。
+- 可写状态(mounts.txt、.ssh-key、.tunnel.pid、bundle、workspace)都在状态目录,默认 `%USERPROFILE%\.claude-dev-vm\`。
+
+## VM 里 Claude Code 报连不上 LLM / cc-switch
+
+```powershell
+# 1. status 全景(本地代理模式看隧道,直连模式看 base_url 探测)
+.\scripts\launch.ps1 status         # 返回 HTTP 4xx = 通(根路径不响应但服务在);000 = 断
+
+# 2. VM 里手动 curl(本地代理模式)
+multipass exec claude-dev -- curl -v http://127.0.0.1:15721/
+# connection refused → 隧道断了,restart
+
+# 3. settings.json 同步了吗(应含 env + 本地 statusLine,无 mcpServers 等;含明文 token,别直接 cat)
+multipass exec claude-dev -- bash -lc "jq -e '.env | type == \"object\" and length > 0' ~/.claude/settings.json >/dev/null && echo 'env 同步 OK' || echo 'env 为空'"
+```
+
+## 隧道进程死了
+
+```powershell
+.\scripts\launch.ps1 restart        # 重拉一切
+# 或只重起隧道(不重启 VM):
+Stop-Process -Id (Get-Content "$env:USERPROFILE\.claude-dev-vm\.tunnel.pid") -Force
+Remove-Item "$env:USERPROFILE\.claude-dev-vm\.tunnel.pid"
+.\scripts\launch.ps1 start          # 检测到 VM 在 Running 会跳过 launch,只重挂/重起隧道
+```
+
+## 挂载失败 / Multipass 报 "Mounts are disabled"
+
+Windows 上 Multipass 默认可能禁用 privileged-mounts。`launch.ps1 start` 首次会自动开启(`multipass set local.privileged-mounts=true`),若失败手动执行一次即可。
+
+## 挂载失败(非 ASCII 路径)
+
+如果 Windows 账号名或项目路径含中文等非 ASCII 字符,`multipass mount` 在 Windows 上支持不稳。
+
+**workspace 挂不上**的备选:
+1. 用 `-WorkspaceHost` 指到 ASCII 路径的目录(状态目录默认就在 `%USERPROFILE%` 下,用户名含中文时会踩到,此时把整个状态目录挪到 ASCII 路径:`-StateDir C:\dev\claude-vm-state`)
+2. 或在 ASCII 路径建 Windows junction 指向真实路径:
+   ```powershell
+   New-Item -ItemType Junction -Path C:\dev\workspace -Target "<实际路径>\workspace"
+   ```
+   然后 `.\scripts\launch.ps1 start -WorkspaceHost C:\dev\workspace` 用 junction 路径启动
+
+**`~/.claude` 挂不上**:用 junction:
+```powershell
+New-Item -ItemType Junction -Path C:\dev\claude-config -Target "$env:USERPROFILE\.claude"
+# 编辑 scripts\launch.ps1 把 $hostClaude 改成 C:\dev\claude-config
+```
+
+## cloud-init 没跑完
+
+```powershell
+multipass exec claude-dev -- cloud-init status --long    # 看详细
+multipass exec claude-dev -- sudo cat /var/log/cloud-init-output.log
+```
+
+## 想完全重来
+
+```powershell
+.\scripts\launch.ps1 delete
+.\scripts\launch.ps1 start
+```
+
+`.ssh-key`、状态目录里的 `workspace\` 不会删,会复用。
+
+---
+
+# 深度排障(§A–§F)
 
 按主流程报错的现象查对应小节。**这些都是"遇到才处理"的分支,不是每台机器都会碰到。** 涉及改全局设置或文件权限的动作(§A/§C),先跟用户确认再执行——这是对外可见的状态改动。
 
 所有 `$xxx` 变量在 Git Bash 里会被吞,把 PowerShell 命令写成 `.ps1` 临时文件再 `powershell -File` 执行(见 §D)。
 
----
-
 ## §A 镜像源被改成非官方源
 
-**现象**:`.\launch.ps1 start` 报
+**现象**:`.\scripts\launch.ps1 start` 报
 ```
 launch failed: Remote "" is unknown or unreachable.
 multipass launch 失败
@@ -32,15 +102,13 @@ multipass set local.image.mirror=
 multipass get local.image.mirror     # 应为空
 multipass find                        # 应能列出 24.04 / noble 别名
 ```
-然后重跑 `.\launch.ps1 start`。
+然后重跑 `.\scripts\launch.ps1 start`。
 
 > 若用户在墙内、官方源连不上,别清镜像源——那样会拉不到镜像。改为让用户先连能访问官方源的网络(如切 VPN 节点)再清,或保留镜像源但改用能解析的完整镜像 URL。
 
----
-
 ## §B launch 后 cloud-init 探测
 
-**现象**:`.\launch.ps1 start` 在等待阶段提示:
+**现象**:`.\scripts\launch.ps1 start` 在等待阶段提示:
 ```
 cloud-init status 等待超时(20 分钟),继续后续步骤验证
 ```
@@ -62,9 +130,7 @@ multipass exec claude-dev -- sudo tail -n 80 /var/log/cloud-init-output.log
 multipass exec claude-dev -- bash -lc "node -v; command -v claude; command -v fish"
 ```
 
-> **cloud-init 太慢(>10 分钟)?** 项目只走离线安装,先跑 `.\prepare-bundle.ps1` 准备离线 bundle(~220MB 含 cc-pocket,一次性),之后 `delete + start` 走离线模式,cloud-init < 2 分钟。bundle 不齐 `launch.ps1 start` 会直接报错。详见 `bundle/README.md`。
-
----
+> **cloud-init 太慢(>10 分钟)?** 项目只走离线安装,先跑 `.\scripts\prepare-bundle.ps1` 准备离线 bundle(~220MB 含 cc-pocket,一次性),之后 `delete + start` 走离线模式,cloud-init < 2 分钟。bundle 不齐 `launch.ps1 start` 会直接报错。详见 [bundle.md](bundle.md)。
 
 ## §C 宿主机 .claude 权限锁死,env 同步为空(VM 弹登录菜单)
 
@@ -111,8 +177,6 @@ multipass exec claude-dev -- bash -lc "source /etc/profile.d/05-claude-config.sh
 >
 > 若已误伤导致 cc-switch 保存报 os error 5:同样用上面的 `takeown /a` + `icacls /reset /t` 修复,之后 cc-switch 保存恢复正常。
 
----
-
 ## §D Git Bash spawn bug(与 VM 无关,但会反复打断操作)
 
 **现象**:命令随机报
@@ -127,23 +191,22 @@ PowerShell 根本没启动,exit code 5。这是 Git Bash 环境自身的 fork/sp
 - **变量被吞**:Git Bash 会把 `$var`、`$_` 当自己的变量吞掉,导致 PowerShell 报 "Missing expression"。同样用 `.ps1` 文件规避,别在 `powershell -Command "..."` 里内联 `$`。
 - **VM 内路径被改写**:`multipass exec claude-dev -- cat /home/...` 会被 MSYS 把 `/home/...` 改写成 `C:/Program Files/Git/home/...`。用 `bash -lc '...'` 包一层(`multipass exec claude-dev -- bash -lc 'ls ~/workspace'`);涉及 settings 时只做无输出检查,例如 `multipass exec claude-dev -- bash -lc 'jq -e ".env | type == \"object\" and length > 0" ~/.claude/settings.json >/dev/null'`,不要 `cat` 该文件;或前置 `MSYS_NO_PATHCONV=1`。
 
----
-
 ## §E SSH 反向隧道问题
 
-**现象**:`.\launch.ps1 status` 里隧道 `已死`,或 cc-switch 端口探测返回 `000`;VM 里 `claude` 连不上 LLM(但你用的是 localhost 代理模式时才相关,见下方注意)。
+**现象**:`.\scripts\launch.ps1 status` 里隧道 `已死`,或端口探测返回 `000`;VM 里 `claude` 连不上 LLM(仅本地代理模式相关,见下)。
 
 **修复**:
 ```powershell
-.\launch.ps1 restart
+.\scripts\launch.ps1 restart
 # 或只重起隧道不重启 VM:
-Stop-Process -Id (Get-Content .tunnel.pid) -Force; Remove-Item .tunnel.pid
-.\launch.ps1 start        # 检测到 VM Running,只重挂/重起隧道
+Stop-Process -Id (Get-Content "$env:USERPROFILE\.claude-dev-vm\.tunnel.pid") -Force
+Remove-Item "$env:USERPROFILE\.claude-dev-vm\.tunnel.pid"
+.\scripts\launch.ps1 start        # 检测到 VM Running,只重挂/重起隧道
 ```
 
-隧道秒退多半是 VM sshd 没起或 key 没注入,`.\launch.ps1 delete` 后 `start` 重建。
+隧道秒退多半是 VM sshd 没起或 key 没注入,`.\scripts\launch.ps1 delete` 后 `start` 重建。
 
-> **注意 — 隧道未必需要**:项目 README 假设 cc-switch 在 `127.0.0.1:15721` 跑本地代理,VM 靠反向隧道回连。但如果用户的 `ANTHROPIC_BASE_URL` 是**公网网关**(如 `https://xxx.com`,而非 `127.0.0.1:15721`),VM 直连公网即可,反向隧道是多余的(留着无害)。判断:
+> **隧道是否需要已自动判定**:launch.ps1 读宿主机 `~/.claude/settings.json` 的 `env.ANTHROPIC_BASE_URL`——`127.0.0.1`/`localhost`(cc-switch 类本地代理)才起隧道;公网网关(如 `https://xxx.com`)自动跳过,VM 直连。手动确认 VM 里实际用的是哪种:
 > ```powershell
 > multipass exec claude-dev -- bash -lc "jq -r .env.ANTHROPIC_BASE_URL ~/.claude/settings.json"
 > ```
@@ -165,12 +228,12 @@ Bad permissions ... .ssh-key
 Load key ".\\.ssh-key": bad permissions
 ```
 
-**根因**:项目 `.ssh-key` 继承了 `NT AUTHORITY\Authenticated Users`、`BUILTIN\Users` 或 `Everyone` 的访问权。Windows OpenSSH 因私钥可被其他用户读取而拒绝用它签名;这会表现为认证后的隧道 ExitCode 255。
+**根因**:状态目录里的 `.ssh-key` 继承了 `NT AUTHORITY\Authenticated Users`、`BUILTIN\Users` 或 `Everyone` 的访问权。Windows OpenSSH 因私钥可被其他用户读取而拒绝用它签名;这会表现为认证后的隧道 ExitCode 255。
 
-**确认后修复**(改宿主机私钥 ACL,先确认再执行;在项目根目录 PowerShell):
+**确认后修复**(改宿主机私钥 ACL,先确认再执行;任意目录 PowerShell 均可):
 
 ```powershell
-$key = Join-Path $PWD '.ssh-key'
+$key = Join-Path $env:USERPROFILE '.claude-dev-vm\.ssh-key'
 icacls $key /inheritance:r
 icacls $key /remove:g 'NT AUTHORITY\Authenticated Users' 'BUILTIN\Users' 'Everyone'
 icacls $key /grant:r "${env:USERNAME}:(R)"
@@ -180,13 +243,11 @@ icacls $key
 最后输出不应再有 `Authenticated Users`、`BUILTIN\Users` 或 `Everyone`;当前 Windows 用户保留 `(R)` 即可。然后无需重建 VM,直接:
 
 ```powershell
-.\launch.ps1 start        # VM Running 时只重挂/重起隧道
-.\launch.ps1 status
+.\scripts\launch.ps1 start        # VM Running 时只重挂/重起隧道
+.\scripts\launch.ps1 status
 ```
 
-> 本项目已有的 `.ssh-key` 原本可以正常工作;若突然发生此问题,通常是目录/文件 ACL 后来被继承或被其他权限操作修改,不是 VM 的 sshd 或公钥注入故障。
-
----
+> 已有的 `.ssh-key` 原本可以正常工作;若突然发生此问题,通常是目录/文件 ACL 后来被继承或被其他权限操作修改,不是 VM 的 sshd 或公钥注入故障。
 
 ## §F Multipass Windows 服务/后端卡死
 
@@ -218,16 +279,14 @@ Start-Service -Name Multipass
 multipass list
 ```
 
-能列出 VM 后,先看 `claude-dev` 是否已经是 `Running`;它可能已由 Hyper-V 创建,只是原 launch 未等到 SSH。若是 Running,回到项目根目录补完流程(VM Running 时不会重新 launch 镜像,只重挂/重起隧道):
+能列出 VM 后,先看 `claude-dev` 是否已经是 `Running`;它可能已由 Hyper-V 创建,只是原 launch 未等到 SSH。若是 Running,直接补完流程(VM Running 时不会重新 launch 镜像,只重挂/重起隧道):
 
 ```powershell
-.\launch.ps1 start        # 多目录模式带 -NoRootWorkspace,ExtraMounts 自动重挂(VM Running 时不重新 launch)
-.\launch.ps1 status
+.\scripts\launch.ps1 start        # 多目录模式带 -NoRootWorkspace,ExtraMounts 自动重挂
+.\scripts\launch.ps1 status
 ```
 
 若强制结束服务进程后仍无法启动服务,或 `multipass list` 仍卡住,重启 Windows 后再验证 `multipass list`;恢复前不要 delete/rebuild VM。
-
----
 
 ## 安全提醒
 

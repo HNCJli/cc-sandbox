@@ -2,11 +2,15 @@
 <#
     claude-dev VM lifecycle manager.
     Usage:
-        .\launch.ps1 start      # 创建/启动 VM + 挂载 + SSH 反向隧道
-        .\launch.ps1 stop       # 停隧道 + 停 VM
-        .\launch.ps1 restart    # stop + start
-        .\launch.ps1 status     # 看 VM 状态和隧道状态
-        .\launch.ps1 delete     # 删 VM + 清理(不会删 workspace/ 和 .ssh-key)
+        .\scripts\launch.ps1 start      # 创建/启动 VM + 挂载 + SSH 反向隧道
+        .\scripts\launch.ps1 stop       # 停隧道 + 停 VM
+        .\scripts\launch.ps1 restart    # stop + start
+        .\scripts\launch.ps1 status     # 看 VM 状态和隧道状态
+        .\scripts\launch.ps1 delete     # 删 VM + 清理(不会删状态目录里的 workspace/ 和 .ssh-key)
+
+    可写状态(bundle/workspace/mounts.txt/.ssh-key/.tunnel.pid)在 $StateDir,默认
+    %USERPROFILE%\.claude-dev-vm(可用参数 -StateDir 或环境变量 CLAUDE_DEV_VM_HOME 覆盖);
+    仓库根若有旧布局状态文件,首次运行自动拷入 $StateDir(原文件保留)。
 #>
 
 param(
@@ -27,7 +31,7 @@ param(
     [int]$CcSwitchPort = 15721,         # cc-switch 在宿主机监听的端口
 
     [string]$AptMirror = "mirrors.aliyun.com", # VM 初始化时使用的 Ubuntu APT 镜像
-    # 预装 tailscale(家里跨网络用,配对后手机 4G 能通过 cc-pocket 遥控;公司场景别开,会被软件审计识别)
+    # 预装 tailscale(跨网络直连 VM 上跑的服务,如 VM 内 web 的 100.x.x.x:端口;公司场景别开,会被软件审计识别)
     [switch]$EnableTailscale,
 
     # 额外挂载列表,每项 "HostPath" 或 "HostPath=vmSubdir",挂到 ~/workspace/<vmSubdir>
@@ -39,7 +43,12 @@ param(
     # 跳过根 workspace 挂载(并卸掉已有根挂载)。开了它,~/workspace 就是 VM 本地目录,
     # ExtraMounts/mounts.txt 的子目录挂载便不再"嵌套在另一个挂载里"
     [Parameter()]
-    [switch]$NoRootWorkspace
+    [switch]$NoRootWorkspace,
+
+    # 可写状态目录(bundle/workspace/mounts.txt/.ssh-key/.tunnel.pid/rendered yaml)
+    # 默认 %USERPROFILE%\.claude-dev-vm;环境变量 CLAUDE_DEV_VM_HOME 可覆盖,显式传参优先
+    [Parameter()]
+    [string]$StateDir = ""
 )
 
 # PS 5.1 把 native 命令的 stderr 当 terminating error,会让 multipass info(VM 不存在时)直接挂掉
@@ -48,6 +57,31 @@ $ErrorActionPreference = "Continue"
 $scriptDir = $PSScriptRoot
 Set-Location $scriptDir
 . (Join-Path $scriptDir 'progress.ps1')
+
+# ====== 目录布局 ======
+# 只读资产(VM 模板):scripts/ 旁的 assets/(skill 包内,升级可整目录覆盖)
+$assetsDir = (Get-Item (Join-Path $scriptDir '..\assets')).FullName
+if (-not (Test-Path (Join-Path $assetsDir 'cloud-init.yaml'))) { throw "assets 目录不完整: $assetsDir(skill 包损坏?)" }
+
+# 可写状态目录:skill 包外,重装/升级 skill 不影响用户数据
+if (-not $StateDir) {
+    $StateDir = if ($env:CLAUDE_DEV_VM_HOME) { $env:CLAUDE_DEV_VM_HOME } else { Join-Path $env:USERPROFILE '.claude-dev-vm' }
+}
+if (-not (Test-Path $StateDir)) { New-Item -ItemType Directory -Path $StateDir -Force | Out-Null }
+
+# 一次性迁移:老布局把可写状态放在仓库根(scripts/ 的上级),检测到就拷入 $StateDir(不动原文件)
+$legacyRoot = Split-Path $scriptDir -Parent
+foreach ($name in @('bundle', 'workspace', 'mounts.txt', '.ssh-key', '.ssh-key.pub', '.tunnel.pid', '.cloud-init.rendered.yaml')) {
+    $old = Join-Path $legacyRoot $name
+    $new = Join-Path $StateDir $name
+    if ((Test-Path $old) -and -not (Test-Path $new)) {
+        Copy-Item -Path $old -Destination $new -Recurse -Force
+        Write-Host "    迁移旧布局状态: $name → $new(原文件保留,可手动清理)" -ForegroundColor DarkGray
+    }
+}
+
+# -CcSwitchPort 是否被用户显式传入(未显式传时,允许从 base_url 里自动采信端口)
+$ccSwitchPortExplicit = $PSBoundParameters.ContainsKey('CcSwitchPort')
 
 # ====== 常量(不变项) ======
 $vmName         = "claude-dev"
@@ -430,7 +464,7 @@ function Get-VmIp { (Get-VmRecord).IPv4 }
 # 检测 bundle/ 是否齐全(Node tarball + Claude wrapper + Claude Linux 二进制 + cc-pocket)
 # 项目只走离线 bundle 安装,不齐 → start 直接报错(不做在线降级)
 function Test-BundleReady {
-    $bundleDir = Join-Path $scriptDir 'bundle'
+    $bundleDir = Join-Path $StateDir 'bundle'
     if (-not (Test-Path $bundleDir)) { return $false }
     $hasNode  = Get-ChildItem $bundleDir -Filter 'node-v*-linux-x64.tar.xz' -ErrorAction SilentlyContinue |
                 Select-Object -First 1
@@ -451,9 +485,9 @@ function Render-CloudInit {
     )
     Write-Step "渲染 cloud-init.yaml..."
 
-    $templatePath = Join-Path $scriptDir "cloud-init.yaml"
-    $tmuxPath     = Join-Path $scriptDir "tmux.conf"
-    $statuslinePath = Join-Path $scriptDir "statusline.sh"
+    $templatePath = Join-Path $assetsDir "cloud-init.yaml"
+    $tmuxPath     = Join-Path $assetsDir "tmux.conf"
+    $statuslinePath = Join-Path $assetsDir "statusline.sh"
     foreach ($p in @($templatePath, $tmuxPath, $statuslinePath)) {
         if (-not (Test-Path $p)) { throw "缺文件: $p" }
     }
@@ -469,7 +503,7 @@ function Render-CloudInit {
     $statuslineIndented = (($statuslineRaw -split "`r?\n") | ForEach-Object { "      " + $_ }) -join "`n"
     $statuslineIndented = $statuslineIndented.TrimEnd("`n")
 
-    $pubKeyPath = Join-Path $scriptDir ".ssh-key.pub"
+    $pubKeyPath = Join-Path $StateDir ".ssh-key.pub"
     if (-not (Test-Path $pubKeyPath)) { throw ".ssh-key.pub 不存在,Start 流程漏了 keygen 步?" }
     $pubKey = ([System.IO.File]::ReadAllText($pubKeyPath, [System.Text.Encoding]::UTF8)).Trim()
 
@@ -494,16 +528,51 @@ function Render-CloudInit {
     if ($AptMirror -notmatch '^[a-zA-Z0-9.-]+(:[0-9]+)?$') { throw "-AptMirror 只能是合法 hostname,当前值: $AptMirror" }
     $rendered = $rendered.Replace('{{APT_MIRROR_PLACEHOLDER}}', $AptMirror)
 
-    $renderedPath = Join-Path $scriptDir ".cloud-init.rendered.yaml"
+    $renderedPath = Join-Path $StateDir ".cloud-init.rendered.yaml"
     $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
     [System.IO.File]::WriteAllText($renderedPath, $rendered, $utf8NoBom)
     Write-Ok "渲染完成: $renderedPath"
     return $renderedPath
 }
 
+# ====== 隧道模式判定 ======
+# 读宿主机 ~/.claude/settings.json 的 env.ANTHROPIC_BASE_URL:
+#   本地(127.0.0.1/localhost/[::1]) → tunnel:起 SSH 反向隧道回连本地代理(典型:cc-switch)
+#   公网 URL                        → direct:VM 直连,跳过隧道
+# 读不到/解析失败 → 保守按 tunnel(与历史行为一致,隧道留着无害)
+function Get-TunnelDecision {
+    param(
+        [int]$ConfiguredPort,
+        [switch]$ExplicitPort
+    )
+    $port = $ConfiguredPort
+    $baseUrl = $null
+    try {
+        $settingsPath = Join-Path $env:USERPROFILE ".claude\settings.json"
+        if (Test-Path $settingsPath) {
+            $baseUrl = (Get-Content $settingsPath -Raw -Encoding UTF8 | ConvertFrom-Json).env.ANTHROPIC_BASE_URL
+        }
+    } catch { $baseUrl = $null }
+
+    if (-not $baseUrl) {
+        return @{ Mode = 'tunnel'; Port = $port; BaseUrl = $null; Reason = '未读到 ANTHROPIC_BASE_URL,按本地代理处理(保守)' }
+    }
+    $u = $null
+    try { $u = [uri]$baseUrl } catch { }
+    if ($u -and @('127.0.0.1', 'localhost', '::1') -contains $u.Host) {
+        # URL 带非默认端口且用户没显式传 -CcSwitchPort → 采信 URL 里的端口
+        if (-not $ExplicitPort -and $u.Port -gt 0 -and $u.Port -ne 80 -and $u.Port -ne 443) { $port = $u.Port }
+        return @{ Mode = 'tunnel'; Port = $port; BaseUrl = $baseUrl; Reason = "ANTHROPIC_BASE_URL 指向本地 $($u.Host):$($u.Port)" }
+    }
+    if ($u) {
+        return @{ Mode = 'direct'; Port = $port; BaseUrl = $baseUrl; Reason = "ANTHROPIC_BASE_URL 是公网地址($($u.Host)),VM 直连即可" }
+    }
+    return @{ Mode = 'tunnel'; Port = $port; BaseUrl = $baseUrl; Reason = 'ANTHROPIC_BASE_URL 无法解析为 URL,按本地代理处理(保守)' }
+}
+
 # ====== 杀隧道 ======
 function Stop-Tunnel {
-    $pidFile = Join-Path $scriptDir ".tunnel.pid"
+    $pidFile = Join-Path $StateDir ".tunnel.pid"
     if (-not (Test-Path $pidFile)) { return }
     $tpid = (Get-Content $pidFile -First 1).Trim()
     if ($tpid -and (Get-Process -Id $tpid -ErrorAction SilentlyContinue)) {
@@ -569,7 +638,7 @@ function Set-HostMountReadOnly {
 # 返回 string[];无参数且配置文件不存在/为空 → 返回空数组(调用方跳过)
 function Get-ExtraMountsSource {
     if ($ExtraMounts -and $ExtraMounts.Count -gt 0) { return @($ExtraMounts) }
-    $cfg = Join-Path $scriptDir "mounts.txt"
+    $cfg = Join-Path $StateDir "mounts.txt"
     if (-not (Test-Path $cfg)) { return @() }
     if (-not (Test-Path $cfg -PathType Leaf)) { throw "mounts.txt 不是普通文件: $cfg" }
     try {
@@ -718,10 +787,10 @@ function Start-ClaudeDev {
 
     # 隧道复用/清理:start 幂等可反复跑。停旧隧道(后面会重起)
     Stop-Tunnel
-    $pidFile = Join-Path $scriptDir ".tunnel.pid"
+    $pidFile = Join-Path $StateDir ".tunnel.pid"
 
     # SSH keypair
-    $keyPath = Join-Path $scriptDir ".ssh-key"
+    $keyPath = Join-Path $StateDir ".ssh-key"
     if (-not (Test-Path $keyPath)) {
         Write-Step "生成 SSH keypair..."
         # PowerShell 处理空 passphrase 的坑:-N "" 会被 PS 吞成空,用 '""' 包一层
@@ -733,7 +802,7 @@ function Start-ClaudeDev {
     # bundle 检测:项目只走离线 bundle 安装(不齐直接报错,不做在线降级)
     $bundleReady = Test-BundleReady
     if (-not $bundleReady) {
-        throw "bundle 不完整,停止启动。项目不支持在线安装降级——请先跑 .\prepare-bundle.ps1 补齐 Node + Claude Code + cc-pocket 离线包后重试。"
+        throw "bundle 不完整,停止启动。项目不支持在线安装降级——请先跑 .\scripts\prepare-bundle.ps1 补齐 Node + Claude Code + cc-pocket 离线包后重试。"
     }
     Write-Ok "检测到 bundle,安装模式: Node/Claude Code/cc-pocket 使用本地 bundle"
     $renderedPath = Render-CloudInit -EnableTailscale:$EnableTailscale -AptMirror $AptMirror
@@ -772,7 +841,7 @@ function Start-ClaudeDev {
         if ($r.TimedOut) {
             # cloud-init 5.x 偶发"完成信号丢失"(非 1.16 特有),VM 可能实际已就绪。
             # 不再探测 VM 实际状态——直接 throw,让用户 multipass list 确认(避免掩盖真问题)。
-            throw "multipass launch 超时(20 分钟)。cloud-init 5.x 偶发完成信号丢失,VM 可能实际已就绪;请 'multipass list' 确认——若已 Running,重跑 .\launch.ps1 start 只重挂/重起隧道;若未就绪,.\launch.ps1 delete 后重试。日志:%USERPROFILE%\.multipass\data"
+            throw "multipass launch 超时(20 分钟)。cloud-init 5.x 偶发完成信号丢失,VM 可能实际已就绪;请 'multipass list' 确认——若已 Running,重跑 scripts\launch.ps1 start 只重挂/重起隧道;若未就绪,scripts\launch.ps1 delete 后重试。日志:%USERPROFILE%\.multipass\data"
         }
         if ($r.ExitCode -ne 0) {
             $err = if ($r.Stderr) { $r.Stderr.Trim() } else { "(无 stderr)" }
@@ -799,7 +868,7 @@ function Start-ClaudeDev {
     # (实测 2026-08-12:cloud-init done、daemon 健康、mount 180s 仍未完成)。
     # 改用 transfer -r 直接 SFTP 拷贝,绕开 sshfs 推送瓶颈。
     Write-Step "传输离线 bundle 到 VM..."
-    $bundleHost = Join-Path $scriptDir 'bundle'
+    $bundleHost = Join-Path $StateDir 'bundle'
     # 关键文件存在 = 已传过,跳过(幂等)。4 个必需文件全查;wrapper 用 [0-9] 排除 linux-x64 变体(同 install-bundle.sh 的 glob)
     $bundleKeyFiles = 'test -f /home/ubuntu/.bundle/node-v*-linux-x64.tar.xz && test -f /home/ubuntu/.bundle/anthropic-ai-claude-code-[0-9]*.tgz && test -f /home/ubuntu/.bundle/anthropic-ai-claude-code-linux-x64-*.tgz && test -f /home/ubuntu/.bundle/cc-pocket/cc-pocket-daemon-*-linux-x86_64.tar.gz'
     $bundleCheck = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'bash', '-lc', $bundleKeyFiles) -TimeoutSec 30
@@ -829,7 +898,7 @@ function Start-ClaudeDev {
         # 以 root 运行(sudo):tar 解到 /usr/local、npm -g 全局安装都需要 root。
         # 安装脚本单独存为 LF 文件,避免默认 fish 解析多行 bash -lc 参数时破坏引号/换行。
         Write-Step "从 bundle 安装 Node.js、Claude Code 和 cc-pocket..."
-        $installScriptHost = Join-Path $scriptDir 'install-bundle.sh'
+        $installScriptHost = Join-Path $assetsDir 'install-bundle.sh'
         if (-not (Test-Path $installScriptHost)) { throw "缺少 bundle 安装脚本:$installScriptHost" }
         $transfer = Invoke-Multipass -ArgumentList @('transfer', $installScriptHost, "${vmName}:/tmp/install-bundle.sh") -TimeoutSec 30
         if ($transfer.TimedOut -or $transfer.ExitCode -ne 0) { throw "bundle 安装脚本传入 VM 失败。$($transfer.Stderr)" }
@@ -876,7 +945,7 @@ function Start-ClaudeDev {
             Write-Step "使用自定义 workspace 源: $wsHost"
         } else {
             # 默认:项目下 ./workspace(保持原行为)
-            $wsHost = Join-Path $scriptDir "workspace"
+            $wsHost = Join-Path $StateDir "workspace"
             if (-not (Test-Path $wsHost)) {
                 New-Item -ItemType Directory -Path $wsHost | Out-Null
                 Write-Warn "workspace/ 不存在,已新建空目录"
@@ -886,7 +955,7 @@ function Start-ClaudeDev {
         $null = Invoke-Multipass -ArgumentList @('umount', "${vmName}:${mountWorkspace}") -TimeoutSec 30
         $null = Try-Mount -MountArgs @('mount', $wsHost, "${vmName}:${mountWorkspace}") `
                           -Description "挂载 workspace" `
-                          -FailureHint "(中文路径 $wsHost 若挂不上,见 README 故障排查;继续)" `
+                          -FailureHint "(中文路径 $wsHost 若挂不上,见 references/troubleshooting.md;继续)" `
                           -VmTarget $mountWorkspace
     }
 
@@ -897,34 +966,40 @@ function Start-ClaudeDev {
         }
     }
 
-    # SSH 反向隧道
-    Write-Step "启动 SSH 反向隧道(宿主机 $ccSwitchPort ↔ VM 127.0.0.1:$ccSwitchPort)..."
-    $vmIp = Get-VmIp
-    if (-not $vmIp) { throw "无法获取 VM IP,multipass info 看看" }
+    # SSH 反向隧道(仅当宿主机 ANTHROPIC_BASE_URL 指向本地代理时;公网直连则跳过)
+    $tunnel = Get-TunnelDecision -ConfiguredPort $CcSwitchPort -ExplicitPort:$ccSwitchPortExplicit
+    if ($tunnel.Mode -eq 'direct') {
+        Write-Step "跳过 SSH 反向隧道:$($tunnel.Reason)"
+    } else {
+        $tunnelPort = $tunnel.Port
+        Write-Step "启动 SSH 反向隧道(宿主机 $tunnelPort ↔ VM 127.0.0.1:$tunnelPort)..."
+        $vmIp = Get-VmIp
+        if (-not $vmIp) { throw "无法获取 VM IP,multipass info 看看" }
 
-    $knownHosts = Join-Path $env:TEMP "claude-dev-known-hosts"
-    $tunnelArgs = @(
-        "-nNT",
-        "-R", "${ccSwitchPort}:127.0.0.1:${ccSwitchPort}",
-        "-i", $keyPath,
-        "-o", "StrictHostKeyChecking=no",
-        "-o", "UserKnownHostsFile=$knownHosts",
-        "-o", "ServerAliveInterval=30",
-        "-o", "ExitOnForwardFailure=yes",
-        "ubuntu@$vmIp"
-    )
-    # PS 5.1 的 Start-Process 对 ArgumentList 只按空格拼接、不加引号:
-    # $keyPath/$knownHosts 含空格时(用户名带空格的 TEMP、含空格的项目路径)参数会被撕断,手工加引号
-    $tunnelArgsQuoted = ($tunnelArgs | ForEach-Object {
-        if ($_ -match '[\s"]') { '"' + ($_ -replace '"','\"') + '"' } else { $_ }
-    }) -join ' '
-    $proc = Start-Process -FilePath ssh -ArgumentList $tunnelArgsQuoted -PassThru -WindowStyle Hidden
-    Start-Sleep -Milliseconds 800
-    if ($proc.HasExited) {
-        throw "SSH 隧道秒退,ExitCode=$($proc.ExitCode)。可能是 VM sshd 没起或 key 没注入"
+        $knownHosts = Join-Path $env:TEMP "claude-dev-known-hosts"
+        $tunnelArgs = @(
+            "-nNT",
+            "-R", "${tunnelPort}:127.0.0.1:${tunnelPort}",
+            "-i", $keyPath,
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "UserKnownHostsFile=$knownHosts",
+            "-o", "ServerAliveInterval=30",
+            "-o", "ExitOnForwardFailure=yes",
+            "ubuntu@$vmIp"
+        )
+        # PS 5.1 的 Start-Process 对 ArgumentList 只按空格拼接、不加引号:
+        # $keyPath/$knownHosts 含空格时(用户名带空格的 TEMP、含空格的项目路径)参数会被撕断,手工加引号
+        $tunnelArgsQuoted = ($tunnelArgs | ForEach-Object {
+            if ($_ -match '[\s"]') { '"' + ($_ -replace '"','\"') + '"' } else { $_ }
+        }) -join ' '
+        $proc = Start-Process -FilePath ssh -ArgumentList $tunnelArgsQuoted -PassThru -WindowStyle Hidden
+        Start-Sleep -Milliseconds 800
+        if ($proc.HasExited) {
+            throw "SSH 隧道秒退,ExitCode=$($proc.ExitCode)。可能是 VM sshd 没起或 key 没注入"
+        }
+        $proc.Id | Out-File $pidFile -Encoding ascii -Force
+        Write-Ok "隧道 PID $($proc.Id)"
     }
-    $proc.Id | Out-File $pidFile -Encoding ascii -Force
-    Write-Ok "隧道 PID $($proc.Id)"
 
     Write-Host ""
     Complete-StartupProgress -EnableTailscale:$EnableTailscale
@@ -934,8 +1009,8 @@ function Start-ClaudeDev {
     if ($EnableTailscale) {
         Write-Host "Tailscale:  VM 里跑 'sudo tailscale up' 配对(已预装,未配对)"
     }
-    Write-Host "状态:       .\launch.ps1 status"
-    Write-Host "停机:       .\launch.ps1 stop"
+    Write-Host "状态:       scripts\launch.ps1 status"
+    Write-Host "停机:       scripts\launch.ps1 stop"
     Write-Host ""
 }
 
@@ -959,28 +1034,43 @@ function Show-Status {
     }
 
     Write-Step "SSH 反向隧道"
-    $pidFile = Join-Path $scriptDir ".tunnel.pid"
-    if (Test-Path $pidFile) {
-        $tpid = (Get-Content $pidFile -First 1).Trim()
-        $p = Get-Process -Id $tpid -ErrorAction SilentlyContinue
-        if ($p) {
-            Write-Ok "隧道在跑 PID $tpid"
-        } else {
-            Write-Warn ".tunnel.pid 写了 PID $tpid 但进程已死"
-        }
+    $tunnel = Get-TunnelDecision -ConfiguredPort $CcSwitchPort -ExplicitPort:$ccSwitchPortExplicit
+    if ($tunnel.Mode -eq 'direct') {
+        Write-Ok "未启用(直连模式:$($tunnel.Reason))"
     } else {
-        Write-Warn ".tunnel.pid 不存在(隧道未起)"
+        $pidFile = Join-Path $StateDir ".tunnel.pid"
+        if (Test-Path $pidFile) {
+            $tpid = (Get-Content $pidFile -First 1).Trim()
+            $p = Get-Process -Id $tpid -ErrorAction SilentlyContinue
+            if ($p) {
+                Write-Ok "隧道在跑 PID $tpid"
+            } else {
+                Write-Warn ".tunnel.pid 写了 PID $tpid 但进程已死"
+            }
+        } else {
+            Write-Warn ".tunnel.pid 不存在(隧道未起)"
+        }
     }
 
-    Write-Step "VM 内 cc-switch 端口探测"
+    Write-Step "VM 内 LLM 接入探测"
     if ((Get-VmState) -eq "Running") {
-        # curl -w 连不上时也会打 000 且退出非零,`|| echo 000` 会再补一个 → 输出可能是 000000,
-        # 用前缀匹配判失败,避免把探测失败误报成"隧道通了"
-        $code = & multipass exec $vmName -- bash -c "curl -sS -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:$ccSwitchPort/ 2>/dev/null || echo 000"
-        if ($code -match '^000') {
-            Write-Warn "VM 里 curl 127.0.0.1:$ccSwitchPort = $code (隧道可能没通)"
+        if ($tunnel.Mode -eq 'direct') {
+            # 直连模式:从 VM 探测公网 base_url 可达性
+            $code = & multipass exec $vmName -- bash -c "curl -sS -o /dev/null -w '%{http_code}' --max-time 5 '$($tunnel.BaseUrl)/' 2>/dev/null || echo 000"
+            if ($code -match '^000') {
+                Write-Warn "VM 里 curl base_url = $code (公网不可达?)"
+            } else {
+                Write-Ok "VM 里 curl base_url 返回 HTTP $code (直连通了)"
+            }
         } else {
-            Write-Ok "VM 里 curl 127.0.0.1:$ccSwitchPort 返回 HTTP $code (隧道通了)"
+            # curl -w 连不上时也会打 000 且退出非零,`|| echo 000` 会再补一个 → 输出可能是 000000,
+            # 用前缀匹配判失败,避免把探测失败误报成"隧道通了"
+            $code = & multipass exec $vmName -- bash -c "curl -sS -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:$($tunnel.Port)/ 2>/dev/null || echo 000"
+            if ($code -match '^000') {
+                Write-Warn "VM 里 curl 127.0.0.1:$($tunnel.Port) = $code (隧道可能没通)"
+            } else {
+                Write-Ok "VM 里 curl 127.0.0.1:$($tunnel.Port) 返回 HTTP $code (隧道通了)"
+            }
         }
     }
 }
@@ -992,7 +1082,7 @@ function Delete-ClaudeDev {
     Write-Step "删 VM..."
     Invoke-VmActionGraceful -MultipassArgs @('delete', '--purge', $vmName) -DoneMsg "VM 已删除并清理"
     Write-Host ""
-    Write-Host "保留: workspace/、.ssh-key、.ssh-key.pub(下次 start 复用)" -ForegroundColor Green
+    Write-Host "保留: 状态目录($StateDir)里的 workspace/、.ssh-key、.ssh-key.pub(下次 start 复用)" -ForegroundColor Green
 }
 
 # ====== 路由 ======

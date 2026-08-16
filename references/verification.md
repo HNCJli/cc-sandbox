@@ -1,6 +1,6 @@
-# start-vm 验证清单
+# claude-dev-vm 验证清单
 
-回归测试用。按顺序跑,前 4 项 + 测试 6(cc-pocket 随 bundle)必跑,测试 5(Tailscale)可选。每次改 launch.ps1 / cloud-init.yaml / tmux.conf 后建议至少跑 1 + 4。
+回归测试用。按顺序跑,前 4 项 + 测试 6(cc-pocket 随 bundle)必跑,测试 5(Tailscale)可选。每次改 scripts\launch.ps1 / assets\cloud-init.yaml / assets\tmux.conf 后建议至少跑 1 + 4。
 
 **通用约定**:
 - 所有 `multipass exec claude-dev -- bash -lc "..."` 命令**别换成 `cat ~/.claude/settings.json`** —— 该文件含明文 token,见 troubleshooting §C。
@@ -10,22 +10,21 @@
 
 ## 测试 1:传统单根模式回归(必跑)
 
-**目的**:确认 `.\launch.ps1 start`(无参数)的老用法不破。
+**目的**:确认 `.\scripts\launch.ps1 start`(无参数)的老用法不破,且新目录布局(assets/scripts/状态目录)工作正常。
 
 ### 步骤
 
 ```powershell
-cd C:\Users\<你>\Desktop\multipass\claude-code-multipass
-.\launch.ps1 delete          # 干净起步
-.\launch.ps1 start           # 首次 3–15 分钟(取决于网络 + 是否用了 bundle)
+.\scripts\launch.ps1 delete          # 干净起步
+.\scripts\launch.ps1 start           # 首次 3–15 分钟(取决于网络 + 是否用了 bundle)
 ```
 
 ### 验证
 
 ```powershell
-# 1. status 三项全 OK
-.\launch.ps1 status
-# 预期:VM Running、隧道在跑、cc-switch 端口探测 HTTP 4xx
+# 1. status 全景
+.\scripts\launch.ps1 status
+# 预期:VM Running;隧道在跑(本地代理模式)或"直连模式"(公网 base_url);LLM 接入探测 HTTP 4xx
 
 # 2. env 同步到位(应输出 OK,不是 EMPTY)
 multipass exec claude-dev -- bash -lc "jq -e .env ~/.claude/settings.json >/dev/null && echo OK || echo EMPTY"
@@ -48,11 +47,20 @@ claude --dangerously-skip-permissions
 
 | 检查项 | 预期 |
 |---|---|
-| `status` 三项 | 全 OK |
+| `status` | VM Running + 隧道在跑/直连模式 + 探测 HTTP 4xx |
 | env 检查 | `OK` |
 | findmnt | `/home/ubuntu/workspace` 一行 mount(fuse.sshfs) |
 | 工具链 | shell=/usr/bin/fish;fish/fzf/zoxide 都有路径;Node v20.x;claude 在 |
 | `claude` 进 VM | 不弹登录菜单 |
+
+### 布局解耦检查(目录重排后必看)
+
+```powershell
+# 状态目录生效:bundle/密钥/挂载点都在 %USERPROFILE%\.claude-dev-vm 下
+Test-Path "$env:USERPROFILE\.claude-dev-vm\bundle"
+Test-Path "$env:USERPROFILE\.claude-dev-vm\.ssh-key"
+# 旧仓库根若有 mounts.txt/bundle 等旧布局状态,首次 start 应打印"迁移旧布局状态: ..."且原文件保留
+```
 
 ---
 
@@ -73,14 +81,14 @@ mkdir D:\code\test2 -ErrorAction SilentlyContinue
 ### 步骤
 
 ```powershell
-.\launch.ps1 delete
-.\launch.ps1 start -NoRootWorkspace -ExtraMounts "D:\code\test1","D:\code\test2=alias2"
+.\scripts\launch.ps1 delete
+.\scripts\launch.ps1 start -NoRootWorkspace -ExtraMounts "D:\code\test1","D:\code\test2=alias2"
 ```
 
 ### 验证
 
 ```powershell
-.\launch.ps1 status
+.\scripts\launch.ps1 status
 
 # findmnt 看到两条 mount(test1 + alias2)
 multipass exec claude-dev -- bash -lc "findmnt | grep /home/ubuntu/workspace"
@@ -108,8 +116,8 @@ multipass exec claude-dev -- bash -lc "cat ~/workspace/alias2/b.txt"
 ### 步骤
 
 ```powershell
-.\launch.ps1 stop
-.\launch.ps1 start -NoRootWorkspace -ExtraMounts "D:\code\test1","D:\code\test2=alias2"
+.\scripts\launch.ps1 stop
+.\scripts\launch.ps1 start -NoRootWorkspace -ExtraMounts "D:\code\test1","D:\code\test2=alias2"
 ```
 
 ### 验证
@@ -135,22 +143,22 @@ multipass exec claude-dev -- bash -lc "findmnt | grep /home/ubuntu/workspace"
 
 ```powershell
 # (a) -NoRootWorkspace 和 -WorkspaceHost 不能同时用
-.\launch.ps1 start -NoRootWorkspace -WorkspaceHost D:\foo
+.\scripts\launch.ps1 start -NoRootWorkspace -WorkspaceHost D:\foo
 
 # (b) 普通 start 加 -ExtraMounts 会触发嵌套挂载
-.\launch.ps1 start -ExtraMounts D:\code\test1
+.\scripts\launch.ps1 start -ExtraMounts D:\code\test1
 
 # (c) -ExtraMounts 的宿主目录不存在
-.\launch.ps1 start -ExtraMounts "D:\nonexistent-dir-xyz"
+.\scripts\launch.ps1 start -ExtraMounts "D:\nonexistent-dir-xyz"
 
 # (d) -ExtraMounts 的 vmSubdir 含 '..' 逃逸
-.\launch.ps1 start -ExtraMounts "D:\code\test1=..\.."
+.\scripts\launch.ps1 start -ExtraMounts "D:\code\test1=..\.."
 
 # (e) -ExtraMounts 两个项映射到同一子目录
-.\launch.ps1 start -ExtraMounts "D:\code\test1","D:\code\test2=test1"
+.\scripts\launch.ps1 start -ExtraMounts "D:\code\test1","D:\code\test2=test1"
 
 # (f) -WorkspaceHost 目录不存在
-.\launch.ps1 start -WorkspaceHost "D:\nonexistent-ws"
+.\scripts\launch.ps1 start -WorkspaceHost "D:\nonexistent-ws"
 ```
 
 ### 预期
@@ -166,8 +174,8 @@ multipass exec claude-dev -- bash -lc "findmnt | grep /home/ubuntu/workspace"
 ### 步骤
 
 ```powershell
-.\launch.ps1 delete
-.\launch.ps1 start -EnableTailscale
+.\scripts\launch.ps1 delete
+.\scripts\launch.ps1 start -EnableTailscale
 multipass exec claude-dev -- bash -lc "which tailscale"
 ```
 
@@ -180,7 +188,7 @@ multipass exec claude-dev -- bash -lc "which tailscale"
 `-EnableTailscale` 和多目录应能叠加:
 
 ```powershell
-.\launch.ps1 start -EnableTailscale -NoRootWorkspace -ExtraMounts "D:\code\test1"
+.\scripts\launch.ps1 start -EnableTailscale -NoRootWorkspace -ExtraMounts "D:\code\test1"
 multipass exec claude-dev -- bash -lc "which tailscale; findmnt | grep /home/ubuntu/workspace"
 ```
 
@@ -202,7 +210,7 @@ multipass exec claude-dev -- bash -lc "systemctl --user status cc-pocket-daemon 
 ### 预期
 
 - `INSTALLED`(bundle 离线安装,`install-bundle.sh` 最后一步 `command -v cc-pocket-daemon` 强制)
-- 若 `NOT_INSTALLED`:说明 bundle 缺 cc-pocket 离线包,`launch.ps1 start` 会在启动前报错;先 `.\prepare-bundle.ps1` 补齐,再 `delete + start`。
+- 若 `NOT_INSTALLED`:说明 bundle 缺 cc-pocket 离线包,`launch.ps1 start` 会在启动前报错;先 `.\scripts\prepare-bundle.ps1` 补齐,再 `delete + start`。
 
 ---
 
@@ -219,4 +227,4 @@ multipass exec claude-dev -- bash -lc "systemctl --user status cc-pocket-daemon 
 | 隧道秒退 / 端口探测 000 | §E |
 | 隧道报 `ExitCode=255` + `UNPROTECTED PRIVATE KEY FILE` | §E.1 |
 | `multipass list` 卡住 / launch 卡在 SSH | §F |
-| cloud-init 太慢(>15 分钟) | 跑 `prepare-bundle.ps1` 走离线模式(见 `bundle/README.md`) |
+| cloud-init 太慢(>15 分钟) | 跑 `prepare-bundle.ps1` 走离线模式(见 [bundle.md](bundle.md)) |

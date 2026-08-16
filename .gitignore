@@ -1,18 +1,12 @@
-# launch.ps1 运行时产物
-.ssh-key
-.ssh-key.pub
-.tunnel.pid
-.cloud-init.rendered.yaml
-
-# workspace 是用户工作目录,不进 git
-workspace/
-
-# mounts.txt 是用户本地多目录挂载配置(基于 mounts.example.txt 复制),不进 git
-mounts.txt
-
-# bundle/ 二进制离线包(~113MB),只保留 bundle/README.md 进 git
-bundle/*
-!bundle/README.md
+# 可写状态已移到包外状态目录(默认 %USERPROFILE%\.claude-dev-vm\),包内不再产生运行时产物
+# 旧布局遗留的仓库根状态文件(迁移后原样保留),避免误提交
+/.ssh-key
+/.ssh-key.pub
+/.tunnel.pid
+/.cloud-init.rendered.yaml
+/workspace/
+/mounts.txt
+/bundle/
 
 # 本地安装/进度测试脚本
 test-progress.ps1

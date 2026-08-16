@@ -3,25 +3,25 @@
 需要同时挂多个宿主机目录到 VM 时,用 `-NoRootWorkspace` + `-ExtraMounts`(或本地 `mounts.txt`):
 
 ```powershell
-.\launch.ps1 start -NoRootWorkspace -ExtraMounts "D:\code\repo1","E:\proj\repo2=alias2"
+.\scripts\launch.ps1 start -NoRootWorkspace -ExtraMounts "D:\code\repo1","E:\proj\repo2=alias2"
 ```
 
 每项格式 `HostPath` 或 `HostPath=vmSubdir`;简写时子目录名取宿主目录最后一级。VM 内挂成 `~/workspace/<子目录>`。
 
-也可在项目根目录建本地 `mounts.txt`(基于 `mounts.example.txt` 复制,每行一项,`#` 起始为注释),`-ExtraMounts` 未传时自动读它:
+也可在状态目录(默认 `%USERPROFILE%\.claude-dev-vm\`)建 `mounts.txt`(基于 `assets\mounts.example.txt` 复制,每行一项,`#` 起始为注释),`-ExtraMounts` 未传时自动读它:
 
 ```text
 D:\code\repo1
 E:\proj\repo2=alias2
 ```
 
-`mounts.txt` 是本地配置(`.gitignore` 忽略)。
+`mounts.txt` 是用户本地配置,放状态目录(skill 包外),不进仓库。
 
 > **为什么必须 `-NoRootWorkspace`**:Windows 上 Multipass 对嵌套挂载(把目录挂到另一个已挂载目录内部)支持不稳,曾出现挂载失败甚至卡死。根 `~/workspace` 默认挂着 `./workspace`,此时再往 `~/workspace/xxx` 挂会踩到这个问题。`-NoRootWorkspace` 跳过根挂载,让 `~/workspace` 变回 VM 本地目录,子目录挂载便不再嵌套。
 >
 > 多目录模式下,`~/workspace` 是 VM 本地目录,**`delete` VM 时会丢**(子目录里的内容跟着没了)。子目录里别放原始代码,源码留在宿主机目录。
 
-只挂一个目录不需要本页:默认挂项目下 `./workspace`,或用 `-WorkspaceHost` 自定义单根目录(见主 README「常用操作」)。完整 `start` 参数见 [parameters.md](parameters.md)。
+只挂一个目录不需要本页:默认挂状态目录下的 `workspace\`,或用 `-WorkspaceHost` 自定义单根目录(见 SKILL.md 主流程)。完整 `start` 参数见 [parameters.md](parameters.md)。
 
 ## mounts.txt 挂载目录 + junction 汇聚多个工作目录(可选)
 

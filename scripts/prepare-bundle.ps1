@@ -13,9 +13,12 @@
     无缓存时在线解析最新版(避开 GitHub API 限流)。
 
 .EXAMPLE
-    .\prepare-bundle.ps1              # 缺啥下啥
-    .\prepare-bundle.ps1 -Force       # 重新下载所有
-    .\prepare-bundle.ps1 -NodeVersion v20.20.2  # 指定版本
+    .\scripts\prepare-bundle.ps1              # 缺啥下啥
+    .\scripts\prepare-bundle.ps1 -Force       # 重新下载所有
+    .\scripts\prepare-bundle.ps1 -NodeVersion v20.20.2  # 指定版本
+
+bundle 下载到状态目录(默认 %USERPROFILE%\.claude-dev-vm\bundle,可用参数 -StateDir
+或环境变量 CLAUDE_DEV_VM_HOME 覆盖),不占用 skill 包目录。
 
 bundle 内容(约 220MB,含 cc-pocket):
   - node-vXX.X.X-linux-x64.tar.xz          Node 20 LTS Linux 二进制 (~25MB)
@@ -30,11 +33,17 @@ bundle 内容(约 220MB,含 cc-pocket):
 param(
     [switch]$Force,
     [string]$NodeVersion,
-    [string]$CcPocketVersion
+    [string]$CcPocketVersion,
+    # 状态目录(与 launch.ps1 同一规则:显式传参 > CLAUDE_DEV_VM_HOME > %USERPROFILE%\.claude-dev-vm)
+    [string]$StateDir = ""
 )
 
 $ErrorActionPreference = 'Stop'
-$bundleDir = Join-Path $PSScriptRoot 'bundle'
+if (-not $StateDir) {
+    $StateDir = if ($env:CLAUDE_DEV_VM_HOME) { $env:CLAUDE_DEV_VM_HOME } else { Join-Path $env:USERPROFILE '.claude-dev-vm' }
+}
+if (-not (Test-Path $StateDir)) { New-Item -ItemType Directory -Path $StateDir -Force | Out-Null }
+$bundleDir = Join-Path $StateDir 'bundle'
 
 function Write-Step($m) { Write-Host "==> $m" -ForegroundColor Cyan }
 function Write-Ok($m)   { Write-Host "    OK  $m" -ForegroundColor Green }
