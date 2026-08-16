@@ -9,7 +9,7 @@
         .\scripts\launch.ps1 delete     # 删 VM + 清理(不会删状态目录里的 workspace/ 和 .ssh-key)
 
     可写状态(bundle/workspace/mounts.txt/.ssh-key/.tunnel.pid)在 $StateDir,默认
-    %USERPROFILE%\.claude-dev-vm(可用参数 -StateDir 或环境变量 CLAUDE_DEV_VM_HOME 覆盖);
+    %USERPROFILE%\.cc-sandbox(可用参数 -StateDir 或环境变量 CC_SANDBOX_HOME 覆盖);
     仓库根若有旧布局状态文件,首次运行自动拷入 $StateDir(原文件保留)。
 #>
 
@@ -46,7 +46,7 @@ param(
     [switch]$NoRootWorkspace,
 
     # 可写状态目录(bundle/workspace/mounts.txt/.ssh-key/.tunnel.pid/rendered yaml)
-    # 默认 %USERPROFILE%\.claude-dev-vm;环境变量 CLAUDE_DEV_VM_HOME 可覆盖,显式传参优先
+    # 默认 %USERPROFILE%\.cc-sandbox;环境变量 CC_SANDBOX_HOME 可覆盖,显式传参优先
     [Parameter()]
     [string]$StateDir = ""
 )
@@ -65,7 +65,7 @@ if (-not (Test-Path (Join-Path $assetsDir 'cloud-init.yaml'))) { throw "assets �
 
 # 可写状态目录:skill 包外,重装/升级 skill 不影响用户数据
 if (-not $StateDir) {
-    $StateDir = if ($env:CLAUDE_DEV_VM_HOME) { $env:CLAUDE_DEV_VM_HOME } else { Join-Path $env:USERPROFILE '.claude-dev-vm' }
+    $StateDir = if ($env:CC_SANDBOX_HOME) { $env:CC_SANDBOX_HOME } else { Join-Path $env:USERPROFILE '.cc-sandbox' }
 }
 if (-not (Test-Path $StateDir)) { New-Item -ItemType Directory -Path $StateDir -Force | Out-Null }
 

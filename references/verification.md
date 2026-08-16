@@ -1,4 +1,4 @@
-# claude-dev-vm 验证清单
+# cc-sandbox 验证清单
 
 回归测试用。按顺序跑,前 4 项 + 测试 6(cc-pocket 随 bundle)必跑,测试 5(Tailscale)可选。每次改 scripts\launch.ps1 / assets\cloud-init.yaml / assets\tmux.conf 后建议至少跑 1 + 4。
 
@@ -56,9 +56,9 @@ claude --dangerously-skip-permissions
 ### 布局解耦检查(目录重排后必看)
 
 ```powershell
-# 状态目录生效:bundle/密钥/挂载点都在 %USERPROFILE%\.claude-dev-vm 下
-Test-Path "$env:USERPROFILE\.claude-dev-vm\bundle"
-Test-Path "$env:USERPROFILE\.claude-dev-vm\.ssh-key"
+# 状态目录生效:bundle/密钥/挂载点都在 %USERPROFILE%\.cc-sandbox 下
+Test-Path "$env:USERPROFILE\.cc-sandbox\bundle"
+Test-Path "$env:USERPROFILE\.cc-sandbox\.ssh-key"
 # 旧仓库根若有 mounts.txt/bundle 等旧布局状态,首次 start 应打印"迁移旧布局状态: ..."且原文件保留
 ```
 

@@ -10,17 +10,29 @@
 
 ```powershell
 # 前提:已装 Multipass(推荐 1.14.1,勿升 1.16.x)
-git clone https://github.com/HNCJli/cc-sandbox.git "$env:USERPROFILE\.claude\skills\claude-dev-vm"
+git clone https://github.com/HNCJli/cc-sandbox.git "$env:USERPROFILE\.claude\skills\cc-sandbox"
 ```
 
 装好后对 Claude 说"启 VM / 起个 VM / 启动 claude-dev"即可,skill 入口见 [SKILL.md](SKILL.md)。
 
 没有 cc-switch 也能用:脚本读宿主机 `~/.claude/settings.json` 的 `ANTHROPIC_BASE_URL` 自动判定——本地代理(cc-switch 类)起 SSH 反向隧道,公网地址直连跳过隧道。
 
+## 从旧版升级(前身 claude-dev-vm)
+
+新版状态目录改为 `~\.cc-sandbox`、环境变量改为 `CC_SANDBOX_HOME`,**不兼容旧版**(旧的 `CLAUDE_DEV_VM_HOME` 不再识别)。旧版用户三步迁移:
+
+```powershell
+Move-Item "$env:USERPROFILE\.claude-dev-vm" "$env:USERPROFILE\.cc-sandbox"  # 状态整体搬家,免重下 220MB bundle
+& $vm delete                                                                 # 删旧 VM(workspace/.ssh-key 在状态目录,已保留)
+& $vm start                                                                  # 重建 VM(VM 名仍是 claude-dev,镜像有缓存)
+```
+
+VM 内 Tailscale / cc-pocket 需重新配对。skill 目录若按旧路径安装,重新 clone 到 `skills\cc-sandbox` 即可。
+
 ## 手动使用(不经过 Claude)
 
 ```powershell
-$vm = "$env:USERPROFILE\.claude\skills\claude-dev-vm\scripts\launch.ps1"
+$vm = "$env:USERPROFILE\.claude\skills\cc-sandbox\scripts\launch.ps1"
 & $vm start          # 创建/启动 VM + 挂载 + 隧道(如需要);首次先跑 & $vm 所在目录的 prepare-bundle.ps1
 & $vm status         # VM + 隧道/直连 + LLM 接入探测
 & $vm stop | restart | delete
@@ -29,7 +41,7 @@ $vm = "$env:USERPROFILE\.claude\skills\claude-dev-vm\scripts\launch.ps1"
 嫌长可在 PowerShell profile 加一行,之后任何目录 `vm start`:
 
 ```powershell
-function vm { & "$env:USERPROFILE\.claude\skills\claude-dev-vm\scripts\launch.ps1" @args }
+function vm { & "$env:USERPROFILE\.claude\skills\cc-sandbox\scripts\launch.ps1" @args }
 ```
 
 开发本仓库时,从仓库根直接 `.\scripts\launch.ps1 start` 同样可用。
@@ -37,13 +49,13 @@ function vm { & "$env:USERPROFILE\.claude\skills\claude-dev-vm\scripts\launch.ps
 ## 目录结构
 
 ```
-/(skill 包,只读)             %USERPROFILE%\.claude-dev-vm\(状态目录,可写)
+/(skill 包,只读)             %USERPROFILE%\.cc-sandbox\(状态目录,可写)
 ├─ SKILL.md                    ├─ bundle\         离线包(~220MB,prepare-bundle 下载)
 ├─ scripts/                    ├─ workspace\      默认单根 workspace
 │  ├─ launch.ps1               ├─ mounts.txt      多目录挂载配置(基于 assets\mounts.example.txt)
 │  ├─ prepare-bundle.ps1       ├─ .ssh-key(.pub)  VM SSH 密钥
 │  └─ progress.ps1             └─ .tunnel.pid     隧道进程号
-├─ assets/                     (状态目录可用 -StateDir 参数或 CLAUDE_DEV_VM_HOME 环境变量改位置)
+├─ assets/                     (状态目录可用 -StateDir 参数或 CC_SANDBOX_HOME 环境变量改位置)
 │  ├─ cloud-init.yaml          旧布局(状态放仓库根)首次运行自动迁移到状态目录,原文件保留
 │  ├─ install-bundle.sh
 │  ├─ statusline.sh
@@ -56,7 +68,7 @@ function vm { & "$env:USERPROFILE\.claude\skills\claude-dev-vm\scripts\launch.ps
 ## 快速开始(手动)
 
 ```powershell
-cd $env:USERPROFILE\.claude\skills\claude-dev-vm
+cd $env:USERPROFILE\.claude\skills\cc-sandbox
 .\scripts\prepare-bundle.ps1    # 必须:离线 bundle(~220MB 含 cc-pocket,首次慢,只下一次)
 .\scripts\launch.ps1 start      # 首次 3–15 分钟(镜像下载 + bundle 离线装软件)
 multipass shell claude-dev

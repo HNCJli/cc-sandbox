@@ -5,7 +5,7 @@
 | 参数 | 默认 | 说明 |
 |---|---|---|
 | `-WorkspaceHost <目录>` | `""` → 状态目录 `workspace\` | 单根模式自定义宿主 workspace 目录(须已存在,不自动创建;与 `-NoRootWorkspace` 互斥) |
-| `-StateDir <目录>` | `%USERPROFILE%\.claude-dev-vm` | 可写状态目录(bundle/workspace/mounts.txt/.ssh-key 等;也受 `CLAUDE_DEV_VM_HOME` 影响) |
+| `-StateDir <目录>` | `%USERPROFILE%\.cc-sandbox` | 可写状态目录(bundle/workspace/mounts.txt/.ssh-key 等;也受 `CC_SANDBOX_HOME` 影响) |
 | `-Image <镜像>` | `noble` | Ubuntu 镜像(24.04 LTS) |
 | `-Cpus <n>` | `4` | VM CPU 核数 |
 | `-MemoryGB <n>` | `8` | VM 内存(GB) |

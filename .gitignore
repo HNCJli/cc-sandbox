@@ -1,4 +1,4 @@
-# 可写状态已移到包外状态目录(默认 %USERPROFILE%\.claude-dev-vm\),包内不再产生运行时产物
+# 可写状态已移到包外状态目录(默认 %USERPROFILE%\.cc-sandbox\),包内不再产生运行时产物
 # 旧布局遗留的仓库根状态文件(迁移后原样保留),避免误提交
 /.ssh-key
 /.ssh-key.pub

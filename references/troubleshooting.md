@@ -4,7 +4,7 @@
 
 - Multipass:推荐/实测 **1.14.1**,勿升 1.16.x(其 daemon 在 Windows 不稳,list/launch 会卡死或超时)。
 - OpenSSH 客户端:Windows 10+ 通常自带(`ssh -V` 验证);缺则 设置 → 应用 → 可选功能 → 添加 OpenSSH 客户端。
-- 可写状态(mounts.txt、.ssh-key、.tunnel.pid、bundle、workspace)都在状态目录,默认 `%USERPROFILE%\.claude-dev-vm\`。
+- 可写状态(mounts.txt、.ssh-key、.tunnel.pid、bundle、workspace)都在状态目录,默认 `%USERPROFILE%\.cc-sandbox\`。
 
 ## VM 里 Claude Code 报连不上 LLM / cc-switch
 
@@ -25,8 +25,8 @@ multipass exec claude-dev -- bash -lc "jq -e '.env | type == \"object\" and leng
 ```powershell
 .\scripts\launch.ps1 restart        # 重拉一切
 # 或只重起隧道(不重启 VM):
-Stop-Process -Id (Get-Content "$env:USERPROFILE\.claude-dev-vm\.tunnel.pid") -Force
-Remove-Item "$env:USERPROFILE\.claude-dev-vm\.tunnel.pid"
+Stop-Process -Id (Get-Content "$env:USERPROFILE\.cc-sandbox\.tunnel.pid") -Force
+Remove-Item "$env:USERPROFILE\.cc-sandbox\.tunnel.pid"
 .\scripts\launch.ps1 start          # 检测到 VM 在 Running 会跳过 launch,只重挂/重起隧道
 ```
 
@@ -199,8 +199,8 @@ PowerShell 根本没启动,exit code 5。这是 Git Bash 环境自身的 fork/sp
 ```powershell
 .\scripts\launch.ps1 restart
 # 或只重起隧道不重启 VM:
-Stop-Process -Id (Get-Content "$env:USERPROFILE\.claude-dev-vm\.tunnel.pid") -Force
-Remove-Item "$env:USERPROFILE\.claude-dev-vm\.tunnel.pid"
+Stop-Process -Id (Get-Content "$env:USERPROFILE\.cc-sandbox\.tunnel.pid") -Force
+Remove-Item "$env:USERPROFILE\.cc-sandbox\.tunnel.pid"
 .\scripts\launch.ps1 start        # 检测到 VM Running,只重挂/重起隧道
 ```
 
@@ -233,7 +233,7 @@ Load key ".\\.ssh-key": bad permissions
 **确认后修复**(改宿主机私钥 ACL,先确认再执行;任意目录 PowerShell 均可):
 
 ```powershell
-$key = Join-Path $env:USERPROFILE '.claude-dev-vm\.ssh-key'
+$key = Join-Path $env:USERPROFILE '.cc-sandbox\.ssh-key'
 icacls $key /inheritance:r
 icacls $key /remove:g 'NT AUTHORITY\Authenticated Users' 'BUILTIN\Users' 'Everyone'
 icacls $key /grant:r "${env:USERNAME}:(R)"

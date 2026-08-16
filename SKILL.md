@@ -1,9 +1,9 @@
 ---
-name: claude-dev-vm
+name: cc-sandbox
 description: 用 scripts/launch.ps1 在 Windows 上启动/唤醒 claude-dev Multipass VM(Ubuntu + Claude Code + cc-switch env 同步)。当用户说"启 VM""起个 VM""启动 claude-dev""跑一下这个项目的虚拟机"等,用此 skill。仅 Windows。
 ---
 
-# claude-dev-vm — 启动 Multipass 沙箱 VM
+# cc-sandbox — 启动 Multipass 沙箱 VM
 
 把 Claude Code 关进 Multipass Ubuntu VM(最大权限沙箱)。宿主机 cc-switch 写的 LLM env(token / base_url / 模型映射)只读同步进 VM;workspace 双向挂载。
 
@@ -11,11 +11,11 @@ description: 用 scripts/launch.ps1 在 Windows 上启动/唤醒 claude-dev Mult
 
 ## 目录约定(重要)
 
-本 skill 包是**只读**的,可整体覆盖升级;所有**可写状态**(bundle 缓存、workspace、mounts.txt、SSH 密钥、隧道 pid)在状态目录,默认 `%USERPROFILE%\.claude-dev-vm\`(参数 `-StateDir` 或环境变量 `CLAUDE_DEV_VM_HOME` 可覆盖):
+本 skill 包是**只读**的,可整体覆盖升级;所有**可写状态**(bundle 缓存、workspace、mounts.txt、SSH 密钥、隧道 pid)在状态目录,默认 `%USERPROFILE%\.cc-sandbox\`(参数 `-StateDir` 或环境变量 `CC_SANDBOX_HOME` 可覆盖):
 
 ```
 <skill 包>/                       # 只读:scripts/、assets/、references/
-%USERPROFILE%\.claude-dev-vm\     # 可写:bundle\、workspace\、mounts.txt、.ssh-key、.tunnel.pid
+%USERPROFILE%\.cc-sandbox\        # 可写:bundle\、workspace\、mounts.txt、.ssh-key、.tunnel.pid
 ```
 
 从仓库根(开发模式)或 skills 安装目录(用户模式)运行均可,脚本自动定位资产与状态。
@@ -57,7 +57,7 @@ ssh -V                      # OpenSSH 客户端
 | 参数 | 默认 | 备注 |
 |---|---|---|
 | `-WorkspaceHost <目录>` | `""` → 状态目录 `workspace\` | 单根模式自定义宿主 workspace 源;须已存在,与 `-NoRootWorkspace` 互斥 |
-| `-StateDir <目录>` | `%USERPROFILE%\.claude-dev-vm` | 可写状态目录(也受环境变量 `CLAUDE_DEV_VM_HOME` 影响) |
+| `-StateDir <目录>` | `%USERPROFILE%\.cc-sandbox` | 可写状态目录(也受环境变量 `CC_SANDBOX_HOME` 影响) |
 | `-Image` / `-Cpus` / `-MemoryGB` / `-DiskGB` | `noble` / `4` / `8` / `30` | VM 资源,仅 `delete + start` 重建时生效 |
 | `-CcSwitchPort <端口>` | `15721` | 本地代理端口(反向隧道目标),每次启动生效;未显式传时自动采信 base_url 里的端口 |
 | `-AptMirror <域名>` | `mirrors.aliyun.com` | VM 内 APT 镜像,渲染进 cloud-init,仅重建生效 |

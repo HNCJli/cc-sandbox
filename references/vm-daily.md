@@ -9,7 +9,7 @@ VM 默认通过 `multipass shell` 进,不用密码。若要外部 SSH(如 VSCode
 Host claude-dev
     HostName <VM IP>            # multipass info claude-dev 看 IPv4
     User ubuntu
-    IdentityFile ~/.claude-dev-vm/.ssh-key    # 状态目录(Windows OpenSSH 的 ssh_config 会展开 ~)
+    IdentityFile ~/.cc-sandbox/.ssh-key    # 状态目录(Windows OpenSSH 的 ssh_config 会展开 ~)
     StrictHostKeyChecking no
 ```
 
