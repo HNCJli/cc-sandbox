@@ -131,7 +131,6 @@ systemctl --user enable --now cc-pocket-daemon
 ```powershell
 .\scripts\launch.ps1 status    # VM + 隧道/直连 + 可选特性 + LLM 接入探测
 .\scripts\launch.ps1 stop      # 停隧道 + 停 VM(挂载持久,下次 start 自动重挂)
-.\scripts\launch.ps1 restart   # stop + start
 .\scripts\launch.ps1 delete    # 删 VM + 清隧道(状态目录里的 workspace/ 和 .ssh-key 保留)
 ```
 

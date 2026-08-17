@@ -35,7 +35,7 @@ VM 内 Tailscale / cc-pocket 需重新配对。skill 目录若按旧路径安装
 $vm = "$env:USERPROFILE\.claude\skills\cc-sandbox\scripts\launch.ps1"
 & $vm start          # 创建/启动 VM + 挂载 + 隧道(如需要);首次先跑 & $vm 所在目录的 prepare-bundle.ps1
 & $vm status         # VM + 隧道/直连 + LLM 接入探测
-& $vm stop | restart | delete
+& $vm stop | delete
 ```
 
 嫌长可在 PowerShell profile 加一行,之后任何目录 `vm start`:

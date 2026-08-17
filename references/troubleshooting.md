@@ -14,7 +14,7 @@
 
 # 2. VM 里手动 curl(本地代理模式)
 multipass exec claude-dev -- curl -v http://127.0.0.1:15721/
-# connection refused → 隧道断了,restart
+# connection refused → 隧道断了,stop 再 start(或按 §E 只重起隧道)
 
 # 3. settings.json 同步了吗(应含 env + 本地 statusLine,无 mcpServers 等;含明文 token,别直接 cat)
 multipass exec claude-dev -- bash -lc "jq -e '.env | type == \"object\" and length > 0' ~/.claude/settings.json >/dev/null && echo 'env 同步 OK' || echo 'env 为空'"
@@ -23,7 +23,8 @@ multipass exec claude-dev -- bash -lc "jq -e '.env | type == \"object\" and leng
 ## 隧道进程死了
 
 ```powershell
-.\scripts\launch.ps1 restart        # 重拉一切
+.\scripts\launch.ps1 stop           # 重拉一切 = 先停再起
+.\scripts\launch.ps1 start
 # 或只重起隧道(不重启 VM):
 Stop-Process -Id (Get-Content "$env:USERPROFILE\.cc-sandbox\.tunnel.pid") -Force
 Remove-Item "$env:USERPROFILE\.cc-sandbox\.tunnel.pid"
@@ -208,7 +209,8 @@ PowerShell 根本没启动,exit code 5。这是 Git Bash 环境自身的 fork/sp
 
 **修复**:
 ```powershell
-.\scripts\launch.ps1 restart
+.\scripts\launch.ps1 stop
+.\scripts\launch.ps1 start
 # 或只重起隧道不重启 VM:
 Stop-Process -Id (Get-Content "$env:USERPROFILE\.cc-sandbox\.tunnel.pid") -Force
 Remove-Item "$env:USERPROFILE\.cc-sandbox\.tunnel.pid"

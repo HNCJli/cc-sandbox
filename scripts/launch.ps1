@@ -6,7 +6,6 @@
                                        # (真人终端裸跑会弹"可选特性"多选菜单,回车=保持上次选择;
                                        #  管道/后台/重定向 stdin 时自动跳过菜单,读 features.txt)
         .\scripts\launch.ps1 stop       # 停隧道 + 停 VM
-        .\scripts\launch.ps1 restart    # stop + start
         .\scripts\launch.ps1 status     # 看 VM 状态、隧道状态和已启用的可选特性
         .\scripts\launch.ps1 delete     # 删 VM + 清理(不会删状态目录里的 workspace/ 和 .ssh-key)
 
@@ -17,7 +16,7 @@
 
 param(
     [Parameter(Position = 0)]
-    [ValidateSet("start", "stop", "restart", "status", "delete")]
+    [ValidateSet("start", "stop", "status", "delete")]
     [string]$Action = "start",
 
     # 宿主机要挂进 VM ~/workspace 的目录;空 = 用项目下 ./workspace(默认,向后兼容)
@@ -1248,7 +1247,6 @@ function Delete-ClaudeDev {
 switch ($Action) {
     "start"   { Start-ClaudeDev }
     "stop"    { Stop-ClaudeDev }
-    "restart" { Stop-ClaudeDev; Start-ClaudeDev }
     "status"  { Show-Status }
     "delete"  { Delete-ClaudeDev }
 }
