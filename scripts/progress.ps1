@@ -66,14 +66,17 @@ function Complete-BundleProgress {
 }
 
 function Complete-StartupProgress {
-    param([switch]$EnableTailscale)
+    # EnabledFeatures:本次生效的可选特性 id 列表(launch.ps1 的 $optionalFeatures 目录驱动)
+    param([string[]]$EnabledFeatures = @())
     Show-ProgressStage -Number 5 -Title '处理可选组件'
-    if ($EnableTailscale) {
-        # 与收尾提示"已预装,未配对"对齐,别在同一输出里既 SKIP 又已预装
-        Write-Host '    OK  Tailscale 已随 cloud-init 预装(未配对)' -ForegroundColor Green
-    } elseif (-not $script:progressState['tailscale:skip']) {
-        $script:progressState['tailscale:skip'] = $true
-        Write-Host '    SKIP 未启用 Tailscale' -ForegroundColor DarkGray
+    foreach ($f in $optionalFeatures) {
+        if ($EnabledFeatures -contains $f.Id) {
+            # 与收尾的 FinishHint(如"已预装,未配对")对齐,别在同一输出里既 SKIP 又已启用
+            Write-Host ("    OK  {0} 已启用" -f $f.Name) -ForegroundColor Green
+        } elseif (-not $script:progressState["feature:skip:$($f.Id)"]) {
+            $script:progressState["feature:skip:$($f.Id)"] = $true
+            Write-Host ("    SKIP 未启用 {0}" -f $f.Name) -ForegroundColor DarkGray
+        }
     }
     Show-ProgressStage -Number 6 -Title '初始化完成'
 }

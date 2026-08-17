@@ -1,6 +1,6 @@
 # cc-sandbox 验证清单
 
-回归测试用。按顺序跑,前 4 项 + 测试 6(cc-pocket 随 bundle)必跑,测试 5(Tailscale)可选。每次改 scripts\launch.ps1 / assets\cloud-init.yaml / assets\tmux.conf 后建议至少跑 1 + 4。
+回归测试用。按顺序跑,前 4 项 + 测试 6(cc-pocket 随 bundle)必跑,测试 5(Tailscale)/ 测试 7(可选特性菜单)可选。每次改 scripts\launch.ps1 / assets\cloud-init.yaml / assets\tmux.conf 后建议至少跑 1 + 4。
 
 **通用约定**:
 - 所有 `multipass exec claude-dev -- bash -lc "..."` 命令**别换成 `cat ~/.claude/settings.json`** —— 该文件含明文 token,见 troubleshooting §C。
@@ -169,13 +169,13 @@ multipass exec claude-dev -- bash -lc "findmnt | grep /home/ubuntu/workspace"
 
 ## 测试 5:Tailscale 回归(可选)
 
-**目的**:验证 `-EnableTailscale` 仍能装上 tailscale。用途:跨网络直连 VM 上跑的服务(如通过 `100.x.x.x:端口` 访问 VM 里启动的 web);cc-pocket 已支持任意网络遥控,不依赖 tailscale。
+**目的**:验证交互菜单勾选 Tailscale 后,重建的 VM 里真的装上 tailscale(完整菜单流程见测试 7)。用途:跨网络直连 VM 上跑的服务(如通过 `100.x.x.x:端口` 访问 VM 里启动的 web);cc-pocket 已支持任意网络遥控,不依赖 tailscale。
 
 ### 步骤
 
 ```powershell
 .\scripts\launch.ps1 delete
-.\scripts\launch.ps1 start -EnableTailscale
+.\scripts\launch.ps1 start      # 真人终端:菜单输 1 勾选 Tailscale;重建询问答 y
 multipass exec claude-dev -- bash -lc "which tailscale"
 ```
 
@@ -183,12 +183,14 @@ multipass exec claude-dev -- bash -lc "which tailscale"
 
 `/usr/bin/tailscale`。进 VM 后 `sudo tailscale up` 配对(已配过同账号会自动恢复)。
 
+另:菜单选择会写回状态目录 `features.txt`;之后裸跑 `start`(含 delete + start 重建)也会沿用。想关掉:交互菜单选 `n` 或删掉 features.txt 里那行,再 delete + start。
+
 ### 组合测试(可选)
 
-`-EnableTailscale` 和多目录应能叠加:
+Tailscale 和多目录应能叠加(菜单勾选 + 多目录参数):
 
 ```powershell
-.\scripts\launch.ps1 start -EnableTailscale -NoRootWorkspace -ExtraMounts "D:\code\test1"
+.\scripts\launch.ps1 start -NoRootWorkspace -ExtraMounts "D:\code\test1"
 multipass exec claude-dev -- bash -lc "which tailscale; findmnt | grep /home/ubuntu/workspace"
 ```
 
@@ -211,6 +213,49 @@ multipass exec claude-dev -- bash -lc "systemctl --user status cc-pocket-daemon 
 
 - `INSTALLED`(bundle 离线安装,`install-bundle.sh` 最后一步 `command -v cc-pocket-daemon` 强制)
 - 若 `NOT_INSTALLED`:说明 bundle 缺 cc-pocket 离线包,`launch.ps1 start` 会在启动前报错;先 `.\scripts\prepare-bundle.ps1` 补齐,再 `delete + start`。
+
+---
+
+## 测试 7:可选特性交互菜单 / features.txt(可选)
+
+**目的**:验证真人终端裸跑 `start` 弹多选菜单、选择持久化到 features.txt、重建确认一条命令完成;非交互(管道/后台/Claude 代跑)不弹菜单不卡死。
+
+### 步骤
+
+```powershell
+# (a) 真人 PowerShell 终端裸跑,应弹"可选特性"编号菜单
+.\scripts\launch.ps1 start
+#   输 1 回车 → 勾选 Tailscale;VM 已存在且没装时,应追问"现在删除并重建 VM?",答 y
+#   → 一条命令完成 delete + 重建(不再需要手动跑两条)
+#   答N/回车 = 跳过:VM 不动,收尾提示"已启用但本次跳过了重建,delete + start 后才装进 VM"
+
+# (b) 选择应已写入 features.txt
+Get-Content "$env:USERPROFILE\.cc-sandbox\features.txt"
+# 预期:两行注释头 + 一行 tailscale
+
+# (c) 再裸跑一次 start,菜单应显示 [x] 1(Tailscale 已勾选),直接回车选择不变
+
+# (d) 非交互不弹菜单:stdin 重定向跑(模拟 Claude/后台)
+cmd /c ".\scripts\launch.ps1 start < nul"
+# 预期:无菜单、不卡住;输出"可选特性: Tailscale";VM 里已装(探测通过),不问重建
+
+# (e) status 显示已启用特性
+.\scripts\launch.ps1 status
+# 预期:"可选特性" 段显示 "Tailscale(features.txt 已启用)"
+
+# (f) 关闭:菜单输 n 回车 → features.txt 不再含特性行;delete + start 后 VM 里应无 tailscale
+```
+
+### 预期汇总
+
+| 检查项 | 预期 |
+|---|---|
+| (a) 交互菜单 | 编号多选;非法输入(如 `x`、`9`)重问不崩;重建询问答 N 走"跳过"提示 |
+| (b) features.txt | 注释头 + tailscale 一行 |
+| (c) 回车保持 | `[x]` 预勾选,回车后文件不变 |
+| (d) 非交互 | 不弹菜单直接沿用 features.txt,输出"可选特性: Tailscale" |
+| (e) status | "可选特性" 段列出已启用项 |
+| (f) 关闭 | 选 n 后重建,VM 内 `which tailscale` 无输出 |
 
 ---
 

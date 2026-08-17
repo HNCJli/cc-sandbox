@@ -1,0 +1,12 @@
+# 可选特性示例 —— 一般不用手编:交互终端裸跑 .\scripts\launch.ps1 start 会弹菜单自动改写
+# 每行一个特性 id,`#` 起始为注释,空行忽略;删掉某行(或全注释)即全部关闭
+#
+# 可用特性 id(见 scripts\launch.ps1 的 $optionalFeatures):
+#   tailscale   跨网络直连 VM 上的服务(公司机器别开,会被软件审计识别)
+#
+# 示例(启用 tailscale):
+# tailscale
+#
+# 特性标记为"重建型"的(如 tailscale)需 delete + start 重建 VM 才生效;
+# 交互终端下 start 会探测并询问是否立即重建
+# 此文件放在状态目录(默认 %USERPROFILE%\.cc-sandbox\features.txt),不进仓库

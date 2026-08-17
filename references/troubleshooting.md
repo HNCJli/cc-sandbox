@@ -34,6 +34,17 @@ Remove-Item "$env:USERPROFILE\.cc-sandbox\.tunnel.pid"
 
 Windows 上 Multipass 默认可能禁用 privileged-mounts。`launch.ps1 start` 首次会自动开启(`multipass set local.privileged-mounts=true`),若失败手动执行一次即可。
 
+## 挂载失败:新 VM 首次挂载报 "install-snap change in progress"
+
+刚重建的 VM 上连续挂载(先 `~/.claude` 再 workspace)时,multipass daemon 要先往 VM 里装 `multipass-sshfs` snap,两个挂载请求撞上同一次安装就会报:
+
+```
+Failed to install 'multipass-sshfs': error: snap "multipass-sshfs" has "install-snap" change in progress
+mount failed: Error enabling mount support in 'claude-dev'
+```
+
+`start` 对此是**警告后继续**(其余步骤不受影响),幂等重跑一次 `start` 即可补挂(实测 2026-08-17:重跑后 `.claude` 挂载成功且 RO 生效)。若重跑仍失败,等 snap 装完再跑,或手动 `multipass mount`。
+
 ## 挂载失败(非 ASCII 路径)
 
 如果 Windows 账号名或项目路径含中文等非 ASCII 字符,`multipass mount` 在 Windows 上支持不稳。

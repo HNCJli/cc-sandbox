@@ -3,12 +3,14 @@
     claude-dev VM lifecycle manager.
     Usage:
         .\scripts\launch.ps1 start      # 创建/启动 VM + 挂载 + SSH 反向隧道
+                                       # (真人终端裸跑会弹"可选特性"多选菜单,回车=保持上次选择;
+                                       #  管道/后台/重定向 stdin 时自动跳过菜单,读 features.txt)
         .\scripts\launch.ps1 stop       # 停隧道 + 停 VM
         .\scripts\launch.ps1 restart    # stop + start
-        .\scripts\launch.ps1 status     # 看 VM 状态和隧道状态
+        .\scripts\launch.ps1 status     # 看 VM 状态、隧道状态和已启用的可选特性
         .\scripts\launch.ps1 delete     # 删 VM + 清理(不会删状态目录里的 workspace/ 和 .ssh-key)
 
-    可写状态(bundle/workspace/mounts.txt/.ssh-key/.tunnel.pid)在 $StateDir,默认
+    可写状态(bundle/workspace/mounts.txt/features.txt/.ssh-key/.tunnel.pid)在 $StateDir,默认
     %USERPROFILE%\.cc-sandbox(可用参数 -StateDir 或环境变量 CC_SANDBOX_HOME 覆盖);
     仓库根若有旧布局状态文件,首次运行自动拷入 $StateDir(原文件保留)。
 #>
@@ -31,8 +33,7 @@ param(
     [int]$CcSwitchPort = 15721,         # cc-switch 在宿主机监听的端口
 
     [string]$AptMirror = "mirrors.aliyun.com", # VM 初始化时使用的 Ubuntu APT 镜像
-    # 预装 tailscale(跨网络直连 VM 上跑的服务,如 VM 内 web 的 100.x.x.x:端口;公司场景别开,会被软件审计识别)
-    [switch]$EnableTailscale,
+    # 可选特性(tailscale 等)没有命令行开关:真人终端交互菜单选择,结果持久化到 features.txt
 
     # 额外挂载列表,每项 "HostPath" 或 "HostPath=vmSubdir",挂到 ~/workspace/<vmSubdir>
     # 简写时子目录名取宿主目录最后一级。传了此参数则不读 mounts.txt(参数优先)
@@ -88,6 +89,24 @@ $vmName         = "claude-dev"
 $mountClaudeHost = "/home/ubuntu/.claude-host"          # 宿主机 ~/.claude 挂到 VM 哪里
 $mountWorkspace = "/home/ubuntu/workspace"              # ./workspace 挂到 VM 哪里(放在 ~/ 下)
 # 可调项见 param() 块:$Image / $Cpus / $MemoryGB / $DiskGB / $CcSwitchPort / $AptMirror
+
+# ====== 可选特性目录 ======
+# 交互菜单 / features.txt 持久化 / 收尾提示 / 重建确认全部由此驱动;
+# 新增可选特性 = 在此加一项,再在 Render-CloudInit 里接对应注入块(参考 {{TAILSCALE_BLOCK}} 的接法)
+#   Id          features.txt 里持久化的标识(改名等于换特性,别动)
+#   RebuildOnly 仅重建 VM 时生效(cloud-init 只在 multipass launch 时跑)
+#   Probe       VM 内探测该特性是否已生效的 bash 片段(约定 exit 0=已生效、1=未生效、其他=无法判定)
+#   FinishHint  start 收尾打印的一行提示(如配对指引),不需要则留空
+$optionalFeatures = @(
+    @{
+        Id          = 'tailscale'
+        Name        = 'Tailscale'
+        RebuildOnly = $true
+        Description = '跨网络直连 VM 上的服务(外出/手机 4G 时 SSH、访问 VM 里起的 web);公司机器别开,会被软件审计识别'
+        Probe       = 'type -P tailscaled >/dev/null 2>&1'
+        FinishHint  = "Tailscale:  VM 里跑 'sudo tailscale up' 配对(已预装,未配对)"
+    }
+)
 
 # ====== 日志 helpers ======
 function Write-Step($msg) { Write-Host "==> $msg" -ForegroundColor Cyan }
@@ -480,7 +499,8 @@ function Test-BundleReady {
 # ====== 渲染 cloud-init ======
 function Render-CloudInit {
     param(
-        [switch]$EnableTailscale,
+        # 生效的可选特性 id 列表(来自 Resolve-OptionalFeatures)
+        [Parameter(Mandatory)] [AllowEmptyCollection()] [string[]]$EnabledFeatures,
         [Parameter(Mandatory)] [string]$AptMirror
     )
     Write-Step "渲染 cloud-init.yaml..."
@@ -512,8 +532,10 @@ function Render-CloudInit {
     # SSH_PUBKEY 现在在 runcmd 的 echo "..." 里,不需要缩进
     $rendered = $rendered.Replace('{{SSH_PUBKEY_PLACEHOLDER}}', $pubKey)
 
-    # tailscale 块:启用时插入安装命令(2 空格缩进对齐 runcmd 列表项),否则空字符串(留空行不影响 YAML 解析)
-    if ($EnableTailscale) {
+    # 各可选特性的注入块:按 Id 判断,块内容替换 cloud-init.yaml 里的 {{XXX_BLOCK}} 占位符(2 空格缩进
+    # 对齐 runcmd 列表项),未启用替换成空字符串(留空行不影响 YAML 解析)
+    # 新增特性:assets/cloud-init.yaml 加占位符(注意缩进注释)+ 这里加一段 $xxxBlock
+    if ($EnabledFeatures -contains 'tailscale') {
         $tailscaleBlock = @"
   # tailscale(家里跨网络用;VM 拿 100.x.x.x tailnet IP,配对后手机 4G 能通过 cc-pocket 遥控)
   # 注:仅安装未运行 'tailscale up' 时无出站流量,但软件审计能看到包已装
@@ -766,6 +788,159 @@ function Mount-ExtraMounts {
     return $allMounted
 }
 
+# ====== 可选特性:选择(交互菜单)/持久化(features.txt) ======
+# 持久化文件在 $StateDir\features.txt,风格同 mounts.txt:每行一个特性 id,# 注释,空行忽略
+
+# stdin 是真人终端才弹菜单:Claude 后台跑/管道/重定向 stdin 时自动跳过,避免无人应答卡死
+function Test-InteractiveConsole {
+    return (-not [Console]::IsInputRedirected) -and ($Host.Name -eq 'ConsoleHost') -and [Environment]::UserInteractive
+}
+
+# 读 features.txt(无文件/空 → 空列表);未知 id 忽略并提示(版本升降级/手误的向前兼容)
+function Get-SavedFeatureIds {
+    $cfg = Join-Path $StateDir "features.txt"
+    if (-not (Test-Path $cfg -PathType Leaf)) { return @() }
+    $known = @($optionalFeatures | ForEach-Object { $_.Id })
+    $ids = @()
+    foreach ($line in (Get-Content $cfg -Encoding UTF8)) {
+        $t = $line.Trim()
+        if ($t -eq "" -or $t.StartsWith("#")) { continue }
+        if ($known -contains $t) {
+            $ids += $t
+        } else {
+            Write-Host "    忽略 features.txt 里的未知特性: $t(可能是新旧版本 skill 的标识)" -ForegroundColor DarkGray
+        }
+    }
+    return @($ids)
+}
+
+function Set-SavedFeatureIds {
+    # AllowEmptyCollection:全不选(菜单 n)时写回空列表,Mandatory 默认会拒空数组(实测 2026-08-17)
+    param([Parameter(Mandatory)] [AllowEmptyCollection()] [string[]]$Ids)
+    $cfg = Join-Path $StateDir "features.txt"
+    $lines = @(
+        "# 可选特性选择:launch.ps1 start 交互菜单会自动改写此文件"
+        "# 每行一个特性 id;删掉某行即关闭该特性(重建型特性需 delete + start 重建才生效)"
+    ) + @($Ids)
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($cfg, ($lines -join "`n") + "`n", $utf8NoBom)
+}
+
+# 解析菜单输入:编号(逗号/空格分隔);a=全选,n=全不选;空=保持当前;非法输入返回 $null(调用方重问)
+# 返回一律用 , 包一层:PS 函数返回空数组会坍缩成"无输出",调用方就没法和 $null(非法)区分了
+function ConvertTo-FeatureSelection {
+    # AllowEmptyString:回车=保持当前 是核心交互,Mandatory string 默认拒空串
+    # (实测 2026-08-17:按回车 Read-Host 返回 "" → 参数绑定报错 → 被误判"输入无法识别"死循环)
+    param(
+        [Parameter(Mandatory)] [AllowEmptyString()] [string]$Answer,
+        [Parameter(Mandatory)] [AllowEmptyCollection()] [string[]]$Current
+    )
+    $t = $Answer.Trim()
+    if ($t -eq "") { return ,@($Current) }
+    if ($t -match '^(a|all|全选)$')     { return ,@($optionalFeatures | ForEach-Object { $_.Id }) }
+    if ($t -match '^(n|none|0|全不选|-)$') { return ,@() }
+    $picked = @()
+    foreach ($tok in ($t -split '[,\s、;]+')) {
+        if ($tok -eq "") { continue }
+        if ($tok -notmatch '^\d+$') { return $null }
+        $i = [int]$tok
+        if ($i -lt 1 -or $i -gt $optionalFeatures.Count) { return $null }
+        $id = $optionalFeatures[$i - 1].Id
+        if ($picked -notcontains $id) { $picked += $id }
+    }
+    return ,$picked
+}
+
+# 编号多选菜单:回车=保持当前;返回选中的 id 列表(不落盘,由 Resolve-OptionalFeatures 统一写)
+function Select-OptionalFeatures {
+    param([Parameter(Mandatory)] [AllowEmptyCollection()] [string[]]$Current)
+    Write-Host ""
+    Write-Step "可选特性(勾选后预装进 VM;选择会保存到 $StateDir\features.txt,下次 start 自动沿用)"
+    for ($i = 0; $i -lt $optionalFeatures.Count; $i++) {
+        $f = $optionalFeatures[$i]
+        $mark   = if ($Current -contains $f.Id) { "[x]" } else { "[ ]" }
+        $suffix = if ($f.RebuildOnly) { "(改动需重建 VM 才生效)" } else { "" }
+        Write-Host ("  {0} {1}. {2} {3}" -f $mark, ($i + 1), $f.Description, $suffix)
+    }
+    Write-Host "  输入要启用的编号:如 1;多个逗号分隔;a=全选 n=全不选;直接回车=保持当前"
+    while ($true) {
+        $picked = ConvertTo-FeatureSelection -Answer (Read-Host "选择") -Current $Current
+        if ($null -ne $picked) { return @($picked) }
+        Write-Warn "输入无法识别。示例: 1 / 1,2 / a / n / 回车保持当前"
+    }
+}
+
+# 汇总本次生效的可选特性 id:交互菜单(真人终端)> features.txt > 全关
+# 结果统一写回 features.txt:delete + start 重建、日常 start 都不用再记参数
+function Resolve-OptionalFeatures {
+    $saved = @(Get-SavedFeatureIds)
+    if (Test-InteractiveConsole) {
+        $picked = @(Select-OptionalFeatures -Current $saved)
+    } else {
+        $picked = $saved
+    }
+    # 与文件不一致才写,避免每次 start 都碰文件
+    $differs = (@($picked).Count -ne @($saved).Count) -or (@($picked | Where-Object { $saved -notcontains $_ }).Count -gt 0)
+    if ($differs) { Set-SavedFeatureIds -Ids @($picked) }
+    # 空选择也要以"空数组"传给调用方:不加逗号包裹,空数组会坍缩成无输出,
+    # 调用方拿到 $null → Render-CloudInit/Confirm-RebuildForFeatures 参数绑定报错(实测 2026-08-17)
+    return ,@($picked)
+}
+
+# VM 内探测某特性是否已生效:Probe 片段约定 exit 0 = 已生效、exit 1 = 未生效;
+# 其他退出码/超时 = 无法判定(重试后仍失败返回 $null,调用方按未知处理,不据此触发重建询问,
+# 防止 SSH 偶发抖动被误读成"特性没装"而怂恿用户重建)
+function Test-FeatureInVm {
+    param([Parameter(Mandatory)] [string]$Probe)
+    foreach ($try in 1..3) {
+        $r = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'bash', '-lc', $Probe) -TimeoutSec 15
+        if (-not $r.TimedOut -and $r.ExitCode -eq 0) { return $true }
+        # exit 1 且 stderr 干净才是"探测跑了、确实没装"(probe 自身重定向了 stderr);
+        # 带 stderr 的 exit 1 更可能是 SSH/daemon 抖动,不当作未生效
+        if (-not $r.TimedOut -and $r.ExitCode -eq 1 -and [string]::IsNullOrWhiteSpace($r.Stderr)) { return $false }
+        Start-Sleep -Seconds 3   # 刚唤醒时 SSH 可能没就绪,稍等重试
+    }
+    return $null
+}
+
+# 已有 VM 上新启用、尚未生效的重建型特性:交互询问是否立即删除重建(替代手动 delete + start 两条命令)
+# 返回 $true = VM 仍在(走重挂/重起隧道),$false = 已删除(走重新 launch)
+function Confirm-RebuildForFeatures {
+    param([Parameter(Mandatory)] [AllowEmptyCollection()] [string[]]$EnabledFeatures)
+    $pending = @(); $unknown = @()
+    foreach ($f in $optionalFeatures) {
+        if (-not $f.RebuildOnly -or $EnabledFeatures -notcontains $f.Id) { continue }
+        $inVm = Test-FeatureInVm -Probe $f.Probe
+        if ($inVm -eq $true) { continue }
+        if ($null -eq $inVm) { $unknown += $f.Name } else { $pending += $f }
+    }
+    if ($unknown.Count -gt 0) {
+        Write-Warn "无法确认 VM 是否已装: $($unknown -join ', ')(探测超时)。若属新启用,需 delete + start 重建才生效"
+    }
+    if ($pending.Count -eq 0) { return $true }
+    $names = ($pending | ForEach-Object { $_.Name }) -join ', '
+    if (-not (Test-InteractiveConsole)) {
+        Write-Warn "新启用的 $names 需重建 VM 才生效,本次 start 不动现有 VM。交互终端裸跑 start 可选立即重建"
+        $script:skippedRebuildIds = @($script:skippedRebuildIds) + @($pending | ForEach-Object { $_.Id })
+        return $true
+    }
+    Write-Warn "新启用的 $names 需要重建 VM(cloud-init 只在创建 VM 时跑;状态目录的 workspace/SSH key 等保留)"
+    while ($true) {
+        $ans = (Read-Host "现在删除并重建 VM?(y=重建, N=跳过)").Trim()
+        if ($ans -match '^[Yy]') {
+            Write-Step "删除旧 VM 以应用新特性..."
+            Invoke-VmActionGraceful -MultipassArgs @('delete', '--purge', $vmName) -DoneMsg "旧 VM 已删除(状态目录数据保留)" -AbsentMsg "VM 不存在,跳过删除"
+            return $false
+        }
+        if ($ans -eq "" -or $ans -match '^[Nn]') {
+            Write-Warn "跳过重建,$names 将在下次 delete + start 时生效"
+            # 记下跳过的特性,收尾提示不能再说"已预装,可配对"——包根本还没进 VM
+            $script:skippedRebuildIds = @($script:skippedRebuildIds) + @($pending | ForEach-Object { $_.Id })
+            return $true
+        }
+    }
+}
+
 # ====== start ======
 function Start-ClaudeDev {
     Assert-Prerequisites
@@ -784,6 +959,15 @@ function Start-ClaudeDev {
         throw "-WorkspaceHost 必须是已存在的目录: $WorkspaceHost"
     }
     $resolvedExtraMounts = if ($extraItems.Count -gt 0) { Resolve-ExtraMounts -Items $extraItems } else { @() }
+
+    # 可选特性:交互菜单(真人终端)> features.txt;选择统一写回 features.txt(重建后不丢)
+    $enabledFeatures = Resolve-OptionalFeatures
+    if (@($enabledFeatures).Count -eq 0) {
+        Write-Host "    可选特性: 无(想启用:交互终端裸跑 start 弹菜单,或编辑 $StateDir\features.txt)" -ForegroundColor DarkGray
+    } else {
+        $featureNames = ($optionalFeatures | Where-Object { $enabledFeatures -contains $_.Id } | ForEach-Object { $_.Name }) -join ', '
+        Write-Ok "可选特性: $featureNames"
+    }
 
     # 隧道复用/清理:start 幂等可反复跑。停旧隧道(后面会重起)
     Stop-Tunnel
@@ -805,18 +989,18 @@ function Start-ClaudeDev {
         throw "bundle 不完整,停止启动。项目不支持在线安装降级——请先跑 .\scripts\prepare-bundle.ps1 补齐 Node + Claude Code + cc-pocket 离线包后重试。"
     }
     Write-Ok "检测到 bundle,安装模式: Node/Claude Code/cc-pocket 使用本地 bundle"
-    $renderedPath = Render-CloudInit -EnableTailscale:$EnableTailscale -AptMirror $AptMirror
+    $renderedPath = Render-CloudInit -EnabledFeatures $enabledFeatures -AptMirror $AptMirror
 
     $script:progressState = @{}
     $script:cloudInitShown = $script:progressState
     $script:launchProgressShown = @{}
     Write-Step "启动 VM(若新建:基础 cloud-init + 离线 bundle 装 Node/Claude Code;已存在则只重挂/重起隧道)..."
     # 二态判断:list 失败已在 Test-VmExists 里 throw(fail-fast),绝不猜 absent 跑去 launch 新的
-    if (Test-VmExists) {
+    $vmExists = Test-VmExists
+    if ($vmExists) {
         $state = Get-VmState
-        if ($state -eq "Running") {
-            Write-Warn "VM 已在 Running,start 改为只重挂/重起隧道"
-        } else {
+        if ($state -ne "Running") {
+            # 先唤醒再探测:新启用的重建型特性要看 VM 里实际装没装,VM 停着探不了
             Write-Step "唤醒 VM..."
             $r = Invoke-Multipass -ArgumentList @('start', $vmName) -TimeoutSec 90
             if ($r.TimedOut -or $r.ExitCode -ne 0) {
@@ -824,6 +1008,12 @@ function Start-ClaudeDev {
             }
             Write-Ok "VM 从 $state 唤醒"
         }
+        # 新启用的重建型特性(cloud-init 只在创建 VM 时跑)在现有 VM 上未生效 →
+        # 交互终端询问是否立即 delete+重建(免掉手动两条命令);非交互只提醒,不动现有 VM
+        $vmExists = Confirm-RebuildForFeatures -EnabledFeatures $enabledFeatures
+    }
+    if ($vmExists) {
+        Write-Warn "VM 已存在,start 改为只重挂/重起隧道(重建型参数不生效)"
     } else {
         $launchArgs = @("launch", "--name", $vmName,
                         "--cpus", $cpus,
@@ -1002,12 +1192,17 @@ function Start-ClaudeDev {
     }
 
     Write-Host ""
-    Complete-StartupProgress -EnableTailscale:$EnableTailscale
+    Complete-StartupProgress -EnabledFeatures $enabledFeatures
     Write-Host "==== 完成 ====" -ForegroundColor Green
     Write-Host "进入 VM:    multipass shell $vmName"
     Write-Host "VM 里跑:    claude --dangerously-skip-permissions"
-    if ($EnableTailscale) {
-        Write-Host "Tailscale:  VM 里跑 'sudo tailscale up' 配对(已预装,未配对)"
+    foreach ($f in $optionalFeatures) {
+        if ($enabledFeatures -notcontains $f.Id) { continue }
+        if (@($script:skippedRebuildIds) -contains $f.Id) {
+            Write-Host "$($f.Name):  已启用但本次跳过了重建,delete + start 后才装进 VM"
+        } elseif ($f.FinishHint) {
+            Write-Host $f.FinishHint
+        }
     }
     Write-Host "状态:       scripts\launch.ps1 status"
     Write-Host "停机:       scripts\launch.ps1 stop"
@@ -1049,6 +1244,17 @@ function Show-Status {
             }
         } else {
             Write-Warn ".tunnel.pid 不存在(隧道未起)"
+        }
+    }
+
+    Write-Step "可选特性"
+    $savedFeatures = @(Get-SavedFeatureIds)
+    if ($savedFeatures.Count -eq 0) {
+        Write-Host "    无(交互终端裸跑 start 弹菜单选择,或编辑 $StateDir\features.txt)" -ForegroundColor DarkGray
+    } else {
+        foreach ($id in $savedFeatures) {
+            $f = $optionalFeatures | Where-Object { $_.Id -eq $id }
+            Write-Ok "$($f.Name)(features.txt 已启用)"
         }
     }
 

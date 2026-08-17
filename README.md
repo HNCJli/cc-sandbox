@@ -53,14 +53,16 @@ function vm { & "$env:USERPROFILE\.claude\skills\cc-sandbox\scripts\launch.ps1" 
 ├─ SKILL.md                    ├─ bundle\         离线包(~220MB,prepare-bundle 下载)
 ├─ scripts/                    ├─ workspace\      默认单根 workspace
 │  ├─ launch.ps1               ├─ mounts.txt      多目录挂载配置(基于 assets\mounts.example.txt)
-│  ├─ prepare-bundle.ps1       ├─ .ssh-key(.pub)  VM SSH 密钥
-│  └─ progress.ps1             └─ .tunnel.pid     隧道进程号
+│  ├─ prepare-bundle.ps1       ├─ features.txt    可选特性选择(start 交互菜单自动改写)
+│  └─ progress.ps1             ├─ .ssh-key(.pub)  VM SSH 密钥
+│                               └─ .tunnel.pid     隧道进程号
 ├─ assets/                     (状态目录可用 -StateDir 参数或 CC_SANDBOX_HOME 环境变量改位置)
 │  ├─ cloud-init.yaml          旧布局(状态放仓库根)首次运行自动迁移到状态目录,原文件保留
 │  ├─ install-bundle.sh
 │  ├─ statusline.sh
 │  ├─ tmux.conf
-│  └─ mounts.example.txt
+│  ├─ mounts.example.txt
+│  └─ features.example.txt
 ├─ references/
 └─ README.md / LICENSE
 ```
@@ -76,7 +78,7 @@ multipass shell claude-dev
 claude --dangerously-skip-permissions
 ```
 
-多目录挂载(`-NoRootWorkspace` + mounts.txt)见 [references/mounts.md](references/mounts.md)。
+多目录挂载(`-NoRootWorkspace` + mounts.txt)见 [references/mounts.md](references/mounts.md);可选特性(Tailscale 等)在真人终端裸跑 `start` 时弹菜单选择,持久化到 features.txt,见 [references/optional-features.md](references/optional-features.md)。
 
 ## 架构
 

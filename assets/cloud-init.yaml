@@ -171,7 +171,7 @@ runcmd:
   - printf '%s\n' 'stage=4' 'package=2' 'package_name=tmux 配置完成' > /run/claude-dev/progress && printf '%s\n' 'event=tmux 配置完成' >> /run/claude-dev/events
   - printf '%s\n' 'stage=4' 'package=3' 'package_name=SSH 配置完成' > /run/claude-dev/progress && printf '%s\n' 'event=SSH 配置完成' >> /run/claude-dev/events
   - printf '%s\n' 'stage=4' 'package=4' 'package_name=Claude 配置同步逻辑完成' > /run/claude-dev/progress && printf '%s\n' 'event=Claude 配置同步逻辑完成' >> /run/claude-dev/events
-  # tailscale 安装插入点(顶格占位符,launch.ps1 -EnableTailscale 时在此注入安装命令)。
-  # 勿删/勿改缩进:删了该开关就静默失效;缩进会叠加进注入块破坏 YAML。字面量别写进注释,Replace 会连注释一起替换
+  # tailscale 安装插入点(顶格占位符,交互菜单勾选 tailscale 时在此注入安装命令)。
+  # 勿删/勿改缩进:删了占位符就静默失效;缩进会叠加进注入块破坏 YAML。字面量别写进注释,Replace 会连注释一起替换
 {{TAILSCALE_BLOCK}}
   - printf '%s\n' 'event=基础 cloud-init 完成，等待 bundle 传输' >> /run/claude-dev/events

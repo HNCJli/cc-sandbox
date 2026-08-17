@@ -11,11 +11,11 @@ description: 用 scripts/launch.ps1 在 Windows 上启动/唤醒 claude-dev Mult
 
 ## 目录约定(重要)
 
-本 skill 包是**只读**的,可整体覆盖升级;所有**可写状态**(bundle 缓存、workspace、mounts.txt、SSH 密钥、隧道 pid)在状态目录,默认 `%USERPROFILE%\.cc-sandbox\`(参数 `-StateDir` 或环境变量 `CC_SANDBOX_HOME` 可覆盖):
+本 skill 包是**只读**的,可整体覆盖升级;所有**可写状态**(bundle 缓存、workspace、mounts.txt、features.txt、SSH 密钥、隧道 pid)在状态目录,默认 `%USERPROFILE%\.cc-sandbox\`(参数 `-StateDir` 或环境变量 `CC_SANDBOX_HOME` 可覆盖):
 
 ```
 <skill 包>/                       # 只读:scripts/、assets/、references/
-%USERPROFILE%\.cc-sandbox\        # 可写:bundle\、workspace\、mounts.txt、.ssh-key、.tunnel.pid
+%USERPROFILE%\.cc-sandbox\        # 可写:bundle\、workspace\、mounts.txt、features.txt、.ssh-key、.tunnel.pid
 ```
 
 从仓库根(开发模式)或 skills 安装目录(用户模式)运行均可,脚本自动定位资产与状态。
@@ -52,6 +52,8 @@ ssh -V                      # OpenSSH 客户端
 
 多目录模式必须 `-NoRootWorkspace`(Windows 上 Multipass 对嵌套挂载支持不稳);`-WorkspaceHost` 只在传统模式(单根)下用。
 
+**可选特性(交互选择,不用记参数)**:可选特性(如 Tailscale)**没有命令行开关**。真人 PowerShell 终端裸跑 `start` 会弹编号多选菜单,输入编号回车即可增减(`a` 全选、`n` 全不选),选择持久化到状态目录 `features.txt`。直接回车 = 保持上次选择;stdin 被重定向时(后台/管道/Claude 代跑)自动跳过菜单、静默沿用 `features.txt`(要改选择就编辑该文件)。新启用的"重建型"特性在 VM 已存在时会被探测到,交互询问是否立即 delete + 重建:答 `y` 一条命令完成(状态目录数据保留);答 `N`/回车跳过,VM 不动,下次 `delete + start` 才生效(收尾提示会注明包尚未装进 VM)。特性清单见 [references/optional-features.md](references/optional-features.md)。
+
 **`start` 全部参数**(权威来源:`scripts\launch.ps1` 顶部 `param()` 块):
 
 | 参数 | 默认 | 备注 |
@@ -61,7 +63,7 @@ ssh -V                      # OpenSSH 客户端
 | `-Image` / `-Cpus` / `-MemoryGB` / `-DiskGB` | `noble` / `4` / `8` / `30` | VM 资源,仅 `delete + start` 重建时生效 |
 | `-CcSwitchPort <端口>` | `15721` | 本地代理端口(反向隧道目标),每次启动生效;未显式传时自动采信 base_url 里的端口 |
 | `-AptMirror <域名>` | `mirrors.aliyun.com` | VM 内 APT 镜像,渲染进 cloud-init,仅重建生效 |
-| `-EnableTailscale` | 关 | 预装 Tailscale(见 references/optional-features.md),仅重建生效 |
+
 | `-ExtraMounts <列表>` | 空 | `"路径"` / `"路径=子目录"`;须配 `-NoRootWorkspace`;优先于 mounts.txt |
 | `-NoRootWorkspace` | 关 | 多目录模式:跳过根 workspace 挂载 |
 
@@ -127,7 +129,7 @@ systemctl --user enable --now cc-pocket-daemon
 ## 常用子命令
 
 ```powershell
-.\scripts\launch.ps1 status    # VM + 隧道/直连 + LLM 接入探测
+.\scripts\launch.ps1 status    # VM + 隧道/直连 + 可选特性 + LLM 接入探测
 .\scripts\launch.ps1 stop      # 停隧道 + 停 VM(挂载持久,下次 start 自动重挂)
 .\scripts\launch.ps1 restart   # stop + start
 .\scripts\launch.ps1 delete    # 删 VM + 清隧道(状态目录里的 workspace/ 和 .ssh-key 保留)
