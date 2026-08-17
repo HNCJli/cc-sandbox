@@ -52,7 +52,7 @@ ssh -V                      # OpenSSH 客户端
 
 多目录模式必须 `-NoRootWorkspace`(Windows 上 Multipass 对嵌套挂载支持不稳);`-WorkspaceHost` 只在传统模式(单根)下用。
 
-**可选特性(交互选择,不用记参数)**:可选特性(如 Tailscale)**没有命令行开关**。真人 PowerShell 终端裸跑 `start` 会弹编号多选菜单,输入编号回车即可增减(`a` 全选、`n` 全不选),选择持久化到状态目录 `features.txt`。直接回车 = 保持上次选择;stdin 被重定向时(后台/管道/Claude 代跑)自动跳过菜单、静默沿用 `features.txt`(要改选择就编辑该文件)。新启用的"重建型"特性在 VM 已存在时会被探测到,交互询问是否立即 delete + 重建:答 `y` 一条命令完成(状态目录数据保留);答 `N`/回车跳过,VM 不动,下次 `delete + start` 才生效(收尾提示会注明包尚未装进 VM)。特性清单见 [references/optional-features.md](references/optional-features.md)。
+**可选特性(交互选择,不用记参数)**:可选特性(如 Tailscale)**没有命令行开关**。真人 PowerShell 终端裸跑 `start` 会弹**方向键多选菜单**:↑↓ 移动高亮、空格 勾选/取消、回车 确认(数字键可直接切换某项,`a` 全选、`n` 全不选),选择持久化到状态目录 `features.txt`。直接回车 = 保持上次选择;不支持按键的终端(窗口过小/非 console 宿主)自动降级为编号输入;stdin 被重定向时(后台/管道/Claude 代跑)自动跳过菜单、静默沿用 `features.txt`(要改选择就编辑该文件)。新启用的"重建型"特性在 VM 已存在时会被探测到,交互询问是否立即 delete + 重建:答 `y` 一条命令完成(状态目录数据保留);答 `N`/回车跳过,VM 不动,下次 `delete + start` 才生效(收尾提示会注明包尚未装进 VM)。特性清单见 [references/optional-features.md](references/optional-features.md)。
 
 **`start` 全部参数**(权威来源:`scripts\launch.ps1` 顶部 `param()` 块):
 

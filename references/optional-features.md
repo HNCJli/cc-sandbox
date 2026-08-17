@@ -13,10 +13,10 @@ sudo systemctl enable --now docker
 
 ## 跨网络访问 VM(Tailscale)
 
-在外面(手机 4G、咖啡店 WiFi)想直连 VM 上跑的服务时启用 Tailscale。**没有命令行开关,只用交互菜单**:真人终端裸跑 `start`,在"可选特性"菜单里输 `1` 勾选:
+在外面(手机 4G、咖啡店 WiFi)想直连 VM 上跑的服务时启用 Tailscale。**没有命令行开关,只用交互菜单**:真人终端裸跑 `start`,在"可选特性"菜单里用 **↑↓ 移动、空格 勾选、回车 确认**(按数字 `1` 也可直接切换该项;已勾选状态直接回车保持):
 
 ```powershell
-.\scripts\launch.ps1 start      # 弹菜单 → 输 1 回车;已勾选状态直接回车保持
+.\scripts\launch.ps1 start      # 弹菜单 → 空格勾选 Tailscale → 回车;直接回车=保持上次
 ```
 
 选择会写进状态目录 `features.txt`(每行一个特性 id),之后 `delete + start` 重建、日常 start 都自动沿用,不用再记参数;想关掉就再跑菜单选 `n`,或删掉文件里那行(关掉后需重建 VM 才真正卸载)。非交互场景(脚本/CI/Claude 代跑)没有菜单,静默沿用 features.txt;要改选择就直接编辑该文件,格式见 `assets\features.example.txt`。

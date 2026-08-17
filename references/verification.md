@@ -223,17 +223,19 @@ multipass exec claude-dev -- bash -lc "systemctl --user status cc-pocket-daemon 
 ### 步骤
 
 ```powershell
-# (a) 真人 PowerShell 终端裸跑,应弹"可选特性"编号菜单
+# (a) 真人 PowerShell 终端裸跑,应弹"可选特性"方向键多选菜单(TUI)
 .\scripts\launch.ps1 start
-#   输 1 回车 → 勾选 Tailscale;VM 已存在且没装时,应追问"现在删除并重建 VM?",答 y
+#   ↑↓ 移动高亮(黄行)、空格 勾选/取消([x]/[ ])、按数字 1 直接切换该项、
+#   a=全选 n=全不选、回车 提交(写 features.txt)
+#   勾选 Tailscale 后回车;VM 已存在且没装时,应追问"现在删除并重建 VM?",答 y
 #   → 一条命令完成 delete + 重建(不再需要手动跑两条)
-#   答N/回车 = 跳过:VM 不动,收尾提示"已启用但本次跳过了重建,delete + start 后才装进 VM"
+#   答 N/回车 = 跳过:VM 不动,收尾提示"已启用但本次跳过了重建,delete + start 后才装进 VM"
 
 # (b) 选择应已写入 features.txt
 Get-Content "$env:USERPROFILE\.cc-sandbox\features.txt"
 # 预期:两行注释头 + 一行 tailscale
 
-# (c) 再裸跑一次 start,菜单应显示 [x] 1(Tailscale 已勾选),直接回车选择不变
+# (c) 再裸跑一次 start,菜单应预勾选 [x](Tailscale 已勾选),直接回车选择不变
 
 # (d) 非交互不弹菜单:stdin 重定向跑(模拟 Claude/后台)
 cmd /c ".\scripts\launch.ps1 start < nul"
@@ -250,7 +252,7 @@ cmd /c ".\scripts\launch.ps1 start < nul"
 
 | 检查项 | 预期 |
 |---|---|
-| (a) 交互菜单 | 编号多选;非法输入(如 `x`、`9`)重问不崩;重建询问答 N 走"跳过"提示 |
+| (a) 交互菜单 | 方向键多选(↑↓/空格/回车/数字/a/n);重建询问答 N 走"跳过"提示 |
 | (b) features.txt | 注释头 + tailscale 一行 |
 | (c) 回车保持 | `[x]` 预勾选,回车后文件不变 |
 | (d) 非交互 | 不弹菜单直接沿用 features.txt,输出"可选特性: Tailscale" |
