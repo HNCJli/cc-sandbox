@@ -53,8 +53,9 @@ function vm { & "$env:USERPROFILE\.claude\skills\cc-sandbox\scripts\launch.ps1" 
 ├─ SKILL.md                    ├─ bundle\         离线包(~220MB,prepare-bundle 下载)
 ├─ scripts/                    ├─ workspace\      默认单根 workspace
 │  ├─ launch.ps1               ├─ mounts.txt      多目录挂载配置(基于 assets\mounts.example.txt)
-│  ├─ prepare-bundle.ps1       ├─ features.txt    可选特性选择(start 交互菜单自动改写)
-│  └─ progress.ps1             ├─ .ssh-key(.pub)  VM SSH 密钥
+│  ├─ feature-menu.ps1         ├─ features.txt    可选特性选择(start 交互菜单自动改写)
+│  ├─ prepare-bundle.ps1       ├─ .ssh-key(.pub)  VM SSH 密钥
+│  └─ progress.ps1
 │                               └─ .tunnel.pid     隧道进程号
 ├─ assets/                     (状态目录可用 -StateDir 参数或 CC_SANDBOX_HOME 环境变量改位置)
 │  ├─ cloud-init.yaml          旧布局(状态放仓库根)首次运行自动迁移到状态目录,原文件保留
