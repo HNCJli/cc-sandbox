@@ -2,7 +2,7 @@
 
 ## 宿主机路径自动换算(路径映射记忆)
 
-勾选后,`start` 会在挂载完成后往 **VM 内** Claude Code 的全局记忆(`~/.claude/CLAUDE.md`)写入"沙箱说明 + 宿主机↔VM 路径映射表"(只含 workspace 挂载,按本次实际挂载生成:单根模式一条 workspace 映射,多目录模式每条挂载一项)。之后在 VM 里的 Claude Code 对话中**直接贴宿主机 Windows 路径**即可,如:
+勾选后,`start` 会在挂载完成后往 **VM 内** Claude Code 的全局记忆(`~/.claude/CLAUDE.md`)写入"沙箱说明 + 宿主机↔VM 路径映射表"(只含 workspace 挂载,按本次 mounts.txt 实际挂载生成,每条挂载一项)。之后在 VM 里的 Claude Code 对话中**直接贴宿主机 Windows 路径**即可,如:
 
 ```
 看下 D:\multipass-share-dir-worksapce\share-dir-01\test-project\.gitignore

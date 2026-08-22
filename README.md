@@ -19,7 +19,7 @@ git clone https://github.com/HNCJli/cc-sandbox.git "$env:USERPROFILE\.claude\ski
 
 ## 从旧版升级(前身 claude-dev-vm)
 
-新版状态目录改为 `~\.cc-sandbox`、环境变量改为 `CC_SANDBOX_HOME`,**不兼容旧版**(旧的 `CLAUDE_DEV_VM_HOME` 不再识别)。旧版用户三步迁移:
+新版状态目录固定为 `~\.cc-sandbox`(不提供环境变量/参数更换),**不兼容旧版**(旧的 `CLAUDE_DEV_VM_HOME` 不再识别)。旧版用户三步迁移:
 
 ```powershell
 Move-Item "$env:USERPROFILE\.claude-dev-vm" "$env:USERPROFILE\.cc-sandbox"  # 状态整体搬家,免重下 220MB bundle
@@ -51,13 +51,13 @@ function vm { & "$env:USERPROFILE\.claude\skills\cc-sandbox\scripts\launch.ps1" 
 ```
 /(skill 包,只读)             %USERPROFILE%\.cc-sandbox\(状态目录,可写)
 ├─ SKILL.md                    ├─ bundle\         离线包(~220MB,prepare-bundle 下载)
-├─ scripts/                    ├─ workspace\      默认单根 workspace
-│  ├─ launch.ps1               ├─ mounts.txt      多目录挂载配置(基于 assets\mounts.example.txt)
+├─ scripts/                    ├─ mounts.txt      挂载配置(基于 assets\mounts.example.txt)
+│  ├─ launch.ps1               ├─ mounts.example.txt  模板(脚本自动放置)
 │  ├─ feature-menu.ps1         ├─ features.txt    可选特性选择(start 交互菜单自动改写)
 │  ├─ prepare-bundle.ps1       ├─ .ssh-key(.pub)  VM SSH 密钥
 │  └─ progress.ps1
 │                               └─ .tunnel.pid     隧道进程号
-├─ assets/                     (状态目录可用 -StateDir 参数或 CC_SANDBOX_HOME 环境变量改位置)
+├─ assets/                     (状态目录固定 %USERPROFILE%\.cc-sandbox,不可更换)
 │  ├─ cloud-init.yaml          旧布局(状态放仓库根)首次运行自动迁移到状态目录,原文件保留
 │  ├─ install-bundle.sh
 │  ├─ statusline.sh
@@ -79,7 +79,7 @@ multipass shell claude-dev
 claude --dangerously-skip-permissions
 ```
 
-多目录挂载(`-NoRootWorkspace` + mounts.txt)见 [references/mounts.md](references/mounts.md);可选特性(Tailscale 等)在真人终端裸跑 `start` 时弹菜单选择,持久化到 features.txt,见 [references/optional-features.md](references/optional-features.md)。
+workspace 挂载(mounts.txt,每项挂成 `~/workspace/<子目录>`)见 [references/mounts.md](references/mounts.md);可选特性(Tailscale 等)在真人终端裸跑 `start` 时弹菜单选择,持久化到 features.txt,见 [references/optional-features.md](references/optional-features.md)。
 
 ## 架构
 
@@ -95,9 +95,8 @@ Windows 宿主机
      ├─ Fish + fzf + zoxide + tmux
      ├─ ~/.claude/settings.json    只含 env(白名单),RO
      ├─ ~/.claude-host/            ← 宿主机 ~/.claude 整目录挂载(内核层硬 RO)
-     ├─ ~/workspace               ← 单根模式:状态目录 workspace\ 持久挂载;
-     │                               多目录模式(-NoRootWorkspace):VM 本地父目录
-     │                               + 各宿主目录挂到 ~/workspace/<子目录>
+     ├─ ~/workspace               ← VM 本地父目录
+     │                               + mounts.txt 各宿主目录挂到 ~/workspace/<子目录>
      └─ 127.0.0.1:15721            ← SSH 反向隧道 ← 宿主机 cc-switch(或直连公网网关)
 ```
 

@@ -8,9 +8,9 @@
 
 ---
 
-## 测试 1:传统单根模式回归(必跑)
+## 测试 1:基础启动回归(必跑)
 
-**目的**:确认 `.\scripts\launch.ps1 start`(无参数)的老用法不破,且新目录布局(assets/scripts/状态目录)工作正常。
+**目的**:确认 `.\scripts\launch.ps1 start`(无参数,读 mounts.txt)不破,且新目录布局(assets/scripts/状态目录)工作正常。前置:状态目录有 `mounts.txt`(至少一项)。
 
 ### 步骤
 
@@ -32,6 +32,7 @@ multipass exec claude-dev -- bash -lc "jq -e .env ~/.claude/settings.json >/dev/
 # 3. workspace 挂载真到位(以 findmnt 为准)
 multipass exec claude-dev -- bash -lc "findmnt | grep /home/ubuntu/workspace"
 multipass exec claude-dev -- bash -lc "ls -la ~/workspace"
+# 预期:mounts.txt 各项对应子目录的 mount 记录;~/workspace 本身无宿主根挂载
 
 # 4. Fish + 工具链 + Node + Claude Code 装好了
 multipass exec claude-dev -- bash -lc "echo SHELL=\$(getent passwd ubuntu | cut -d: -f7); which fish fzf zoxide; node -v; command -v claude"
@@ -49,7 +50,7 @@ claude --dangerously-skip-permissions
 |---|---|
 | `status` | VM Running + 隧道在跑/直连模式 + 探测 HTTP 4xx |
 | env 检查 | `OK` |
-| findmnt | `/home/ubuntu/workspace` 一行 mount(fuse.sshfs) |
+| findmnt | mounts.txt 各项子目录 mount(fuse.sshfs),无宿主根挂载 |
 | 工具链 | shell=/usr/bin/fish;fish/fzf/zoxide 都有路径;Node v20.x;claude 在 |
 | `claude` 进 VM | 不弹登录菜单 |
 
@@ -66,7 +67,7 @@ Test-Path "$env:USERPROFILE\.cc-sandbox\.ssh-key"
 
 ## 测试 2:多目录模式(必跑)
 
-**目的**:验证 `-NoRootWorkspace` + `-ExtraMounts` 挂多个宿主目录到 `~/workspace/<子目录>`。
+**目的**:验证 mounts.txt 挂多个宿主目录到 `~/workspace/<子目录>`(多项 + 别名)。
 
 ### 准备(一次性)
 
@@ -81,8 +82,10 @@ mkdir D:\code\test2 -ErrorAction SilentlyContinue
 ### 步骤
 
 ```powershell
+# 写测试用 mounts.txt(会覆盖你自己的配置,测完记得还原)
+'D:\code\test1','D:\code\test2=alias2' | Set-Content "$env:USERPROFILE\.cc-sandbox\mounts.txt"
 .\scripts\launch.ps1 delete
-.\scripts\launch.ps1 start -NoRootWorkspace -ExtraMounts "D:\code\test1","D:\code\test2=alias2"
+.\scripts\launch.ps1 start
 ```
 
 ### 验证
@@ -117,7 +120,7 @@ multipass exec claude-dev -- bash -lc "cat ~/workspace/alias2/b.txt"
 
 ```powershell
 .\scripts\launch.ps1 stop
-.\scripts\launch.ps1 start -NoRootWorkspace -ExtraMounts "D:\code\test1","D:\code\test2=alias2"
+.\scripts\launch.ps1 start     # 沿用测试 2 写入的 mounts.txt
 ```
 
 ### 验证
@@ -135,40 +138,36 @@ multipass exec claude-dev -- bash -lc "findmnt | grep /home/ubuntu/workspace"
 
 ---
 
-## 测试 4:参数冲突校验(必跑,最快)
+## 测试 4:mounts.txt 校验(必跑,最快)
 
-**目的**:确认非法参数组合立刻 throw,不进 launch。
+**目的**:确认非法配置立刻 throw,不进 launch。
 
 ### 步骤(每条都应立刻 throw)
 
 ```powershell
-# (a) -NoRootWorkspace 和 -WorkspaceHost 不能同时用
-.\scripts\launch.ps1 start -NoRootWorkspace -WorkspaceHost D:\foo
+# (a) mounts.txt 的宿主目录不存在
+'D:\nonexistent-dir-xyz' | Set-Content "$env:USERPROFILE\.cc-sandbox\mounts.txt"
+.\scripts\launch.ps1 start
 
-# (b) 普通 start 加 -ExtraMounts 会触发嵌套挂载
-.\scripts\launch.ps1 start -ExtraMounts D:\code\test1
+# (b) mounts.txt 的 vmSubdir 含 '..' 逃逸
+'D:\code\test1=..\..' | Set-Content "$env:USERPROFILE\.cc-sandbox\mounts.txt"
+.\scripts\launch.ps1 start
 
-# (c) -ExtraMounts 的宿主目录不存在
-.\scripts\launch.ps1 start -ExtraMounts "D:\nonexistent-dir-xyz"
+# (c) mounts.txt 两个项映射到同一子目录
+'D:\code\test1','D:\code\test2=test1' | Set-Content "$env:USERPROFILE\.cc-sandbox\mounts.txt"
+.\scripts\launch.ps1 start
 
-# (d) -ExtraMounts 的 vmSubdir 含 '..' 逃逸
-.\scripts\launch.ps1 start -ExtraMounts "D:\code\test1=..\.."
-
-# (e) -ExtraMounts 两个项映射到同一子目录
-.\scripts\launch.ps1 start -ExtraMounts "D:\code\test1","D:\code\test2=test1"
-
-# (f) -WorkspaceHost 目录不存在
-.\scripts\launch.ps1 start -WorkspaceHost "D:\nonexistent-ws"
-
-# (g) -NoRootWorkspace 但 mounts.txt 不存在/为空且未传 -ExtraMounts(零挂载)
-#     先临时改名 mounts.txt: Rename-Item "$env:USERPROFILE\.cc-sandbox\mounts.txt" mounts.txt.bak
-.\scripts\launch.ps1 start -NoRootWorkspace
+# (d) mounts.txt 不存在/为空(零挂载)
+Rename-Item "$env:USERPROFILE\.cc-sandbox\mounts.txt" mounts.txt.bak
+.\scripts\launch.ps1 start
 # 预期额外:状态目录自动出现 mounts.example.txt 模板(已存在则不覆盖)
+
+# 测完恢复自己的 mounts.txt(把 mounts.txt.bak 改回,或重写配置)
 ```
 
 ### 预期
 
-七条都报 PowerShell throw,提示 `不能同时使用` / `请加 -NoRootWorkspace` / `宿主机目录不存在` / `不允许含 '..'` / `子目录名重复` / `-WorkspaceHost 必须是已存在的目录` / `-NoRootWorkspace 需要至少一个挂载`。**不进 launch**;(g) 报错文案指向状态目录的 `mounts.example.txt` 模板。
+四条都报 PowerShell throw,提示 `宿主机目录不存在` / `不允许含 '..'` / `子目录名重复` / `start 需要 mounts.txt 配置挂载`。**不进 launch**;(d) 报错文案指向状态目录的 `mounts.example.txt` 模板。
 
 ---
 
@@ -192,10 +191,11 @@ multipass exec claude-dev -- bash -lc "which tailscale"
 
 ### 组合测试(可选)
 
-Tailscale 和多目录应能叠加(菜单勾选 + 多目录参数):
+Tailscale 和多目录应能叠加(菜单勾选 + mounts.txt):
 
 ```powershell
-.\scripts\launch.ps1 start -NoRootWorkspace -ExtraMounts "D:\code\test1"
+'D:\code\test1' | Set-Content "$env:USERPROFILE\.cc-sandbox\mounts.txt"
+.\scripts\launch.ps1 start
 multipass exec claude-dev -- bash -lc "which tailscale; findmnt | grep /home/ubuntu/workspace"
 ```
 
@@ -275,18 +275,18 @@ cmd /c ".\scripts\launch.ps1 start < nul"
 ```powershell
 # (a) 启用:features.txt 加一行 path-map(交互终端则裸跑 start 菜单勾选)
 Add-Content "$env:USERPROFILE\.cc-sandbox\features.txt" "path-map"
-.\scripts\launch.ps1 start -NoRootWorkspace    # 唤醒/重挂后应打印"已写入宿主机↔VM 路径映射"
+.\scripts\launch.ps1 start    # 唤醒/重挂后应打印"已写入宿主机↔VM 路径映射"
 
 # (b) VM 内看映射块(多目录模式:每条挂载一行 + .claude-host 只读行)
 multipass exec claude-dev -- bash -lc "sed -n '/cc-sandbox:begin/,/cc-sandbox:end/p' ~/.claude/CLAUDE.md"
 
 # (c) 幂等:再跑一次 start,块不重复(计数应为 1、总行数不变)
-.\scripts\launch.ps1 start -NoRootWorkspace
+.\scripts\launch.ps1 start
 multipass exec claude-dev -- bash -lc "grep -c 'cc-sandbox:begin' ~/.claude/CLAUDE.md; wc -l < ~/.claude/CLAUDE.md"
 
 # (d) 取消勾选:start 后块应被移除(计数应为 0)
 (Get-Content "$env:USERPROFILE\.cc-sandbox\features.txt") | Where-Object { $_ -ne 'path-map' } | Set-Content "$env:USERPROFILE\.cc-sandbox\features.txt"
-.\scripts\launch.ps1 start -NoRootWorkspace
+.\scripts\launch.ps1 start
 multipass exec claude-dev -- bash -lc "grep -c 'cc-sandbox:begin' ~/.claude/CLAUDE.md"
 ```
 

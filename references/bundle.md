@@ -1,6 +1,6 @@
 # bundle 离线包(状态目录)
 
-bundle 存 cloud-init 离线安装用的本地包,**让 VM 创建不依赖网络下载**。位置在状态目录:默认 `%USERPROFILE%\.cc-sandbox\bundle\`(参数 `-StateDir` / 环境变量 `CC_SANDBOX_HOME` 可改),不占用 skill 包目录,升级 skill 不受影响。
+bundle 存 cloud-init 离线安装用的本地包,**让 VM 创建不依赖网络下载**。位置固定在 `%USERPROFILE%\.cc-sandbox\bundle\`(写死,不提供参数/环境变量更换),不占用 skill 包目录,升级 skill 不受影响。
 
 慢网络下在线装 Node + Claude Code 要 10–15 分钟,反复 `delete + start` 浪费时间;离线 bundle 把 Node 20 LTS + Claude Code + cc-pocket 预下载到本地,launch 时直接挂进 VM 装,cloud-init 压到 < 2 分钟。
 

@@ -50,7 +50,7 @@ Windows 截图
 VM：    /home/ubuntu/workspace/clipboard
 ```
 
-在项目根目录的**用户本地、未跟踪** `mounts.txt` 追加（或使用等价 `-ExtraMounts` 参数）：
+在状态目录的**用户本地、未跟踪** `mounts.txt` 追加：
 
 ```text
 <用户选择的目录>\ClaudeClipboardInbox=clipboard
@@ -60,10 +60,10 @@ VM：    /home/ubuntu/workspace/clipboard
 
 ```powershell
 New-Item -ItemType Directory -Path <用户选择的目录>\ClaudeClipboardInbox
-.\launch.ps1 start -NoRootWorkspace
+.\launch.ps1 start
 ```
 
-该挂载是 `~/workspace` 下的顶级额外挂载；多目录模式用 `-NoRootWorkspace`(Windows 上 Multipass 对嵌套挂载支持不稳)。此方案依赖用户在本机创建并维护收件箱及 `mounts.txt` / `-ExtraMounts`；它们不会随仓库克隆或 VM 删除自动恢复。VM 重建时仅能按当时仍存在、可访问的本地声明重新挂载，不能承诺原样回放。
+该挂载是 `~/workspace` 下的顶级额外挂载（`~/workspace` 保持 VM 本地目录,Windows 上 Multipass 对嵌套挂载支持不稳）。此方案依赖用户在本机创建并维护收件箱及 `mounts.txt`；它们不会随仓库克隆或 VM 删除自动恢复。VM 重建时仅能按当时仍存在、可访问的本地声明重新挂载，不能承诺原样回放。
 
 图片对应关系：
 
@@ -208,7 +208,7 @@ clipboard-YYYYMMDD-HHMMSS-<GUID>.png
    <用户选择的目录>\ClaudeClipboardInbox=clipboard
    ```
 
-4. 执行 `.\launch.ps1 start -NoRootWorkspace` 使新挂载生效(自动读 `mounts.txt`,子目录挂到 `~/workspace` 下)。
+4. 执行 `.\launch.ps1 start` 使新挂载生效(自动读 `mounts.txt`,子目录挂到 `~/workspace` 下)。
 5. 运行 `clipboard-image-bridge.ahk`；托盘退出即可禁用并恢复 Warp 原生 Ctrl+V。
 6. 列出 Ctrl+V 的图片/文本行为差异；强调不自动 Enter。
 7. 说明直接 VM Shell 与 tmux 会话中的 Claude Code 均适用。

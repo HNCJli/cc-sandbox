@@ -50,13 +50,11 @@ mount failed: Error enabling mount support in 'claude-dev'
 
 如果 Windows 账号名或项目路径含中文等非 ASCII 字符,`multipass mount` 在 Windows 上支持不稳。
 
-**workspace 挂不上**的备选:
-1. 用 `-WorkspaceHost` 指到 ASCII 路径的目录(状态目录默认就在 `%USERPROFILE%` 下,用户名含中文时会踩到,此时把整个状态目录挪到 ASCII 路径:`-StateDir C:\dev\claude-vm-state`)
-2. 或在 ASCII 路径建 Windows junction 指向真实路径:
+**mounts.txt 条目挂不上**的备选:在 ASCII 路径建 Windows junction 指向真实目录,把 mounts.txt 里的条目换成 junction 路径:
    ```powershell
-   New-Item -ItemType Junction -Path C:\dev\workspace -Target "<实际路径>\workspace"
+   New-Item -ItemType Junction -Path C:\dev\myrepo -Target "<实际中文路径>\myrepo"
+   # mounts.txt 里写 C:\dev\myrepo
    ```
-   然后 `.\scripts\launch.ps1 start -WorkspaceHost C:\dev\workspace` 用 junction 路径启动
 
 **`~/.claude` 挂不上**:用 junction:
 ```powershell
@@ -295,7 +293,7 @@ multipass list
 能列出 VM 后,先看 `claude-dev` 是否已经是 `Running`;它可能已由 Hyper-V 创建,只是原 launch 未等到 SSH。若是 Running,直接补完流程(VM Running 时不会重新 launch 镜像,只重挂/重起隧道):
 
 ```powershell
-.\scripts\launch.ps1 start        # 多目录模式带 -NoRootWorkspace,ExtraMounts 自动重挂
+.\scripts\launch.ps1 start        # mounts.txt 挂载自动重挂
 .\scripts\launch.ps1 status
 ```
 

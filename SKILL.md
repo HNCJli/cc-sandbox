@@ -11,11 +11,11 @@ description: 用 scripts/launch.ps1 在 Windows 上启动/唤醒 claude-dev Mult
 
 ## 目录约定(重要)
 
-本 skill 包是**只读**的,可整体覆盖升级;所有**可写状态**(bundle 缓存、workspace、mounts.txt、features.txt、SSH 密钥、隧道 pid)在状态目录,默认 `%USERPROFILE%\.cc-sandbox\`(参数 `-StateDir` 或环境变量 `CC_SANDBOX_HOME` 可覆盖):
+本 skill 包是**只读**的,可整体覆盖升级;所有**可写状态**(bundle 缓存、mounts.txt、features.txt、SSH 密钥、隧道 pid)在状态目录,固定 `%USERPROFILE%\.cc-sandbox\`(写死,不提供参数/环境变量更换):
 
 ```
 <skill 包>/                       # 只读:scripts/、assets/、references/
-%USERPROFILE%\.cc-sandbox\        # 可写:bundle\、workspace\、mounts.txt、features.txt、.ssh-key、.tunnel.pid
+%USERPROFILE%\.cc-sandbox\        # 可写:bundle\、mounts.txt、features.txt、.ssh-key、.tunnel.pid、mounts.example.txt
 ```
 
 从仓库根(开发模式)或 skills 安装目录(用户模式)运行均可,脚本自动定位资产与状态。
@@ -35,22 +35,15 @@ ssh -V                      # OpenSSH 客户端
 
 **必须准备 bundle**:项目只走离线安装,先跑一次 `.\scripts\prepare-bundle.ps1` 准备离线 bundle(~220MB 含 cc-pocket,首次慢但只下一次,存入状态目录)。之后 `delete + start` 的 cloud-init 从 13 分钟 → < 2 分钟。bundle 不齐 `launch.ps1 start` 会直接报错,先补齐再启动。
 
-### 2. 启动(选一种挂载模式)
+### 2. 启动
 
-**传统单根模式**(默认,简单):状态目录下 `workspace\` 挂为 VM 根 `~/workspace`。
-
-```powershell
-.\scripts\launch.ps1 start
-```
-
-**多目录挂载**(挂多个宿主目录到 `~/workspace/<子目录>`):状态目录常备 `mounts.example.txt` 模板(脚本运行时自动放置),复制为 `mounts.txt` 填好路径,或直接传 `-ExtraMounts`。两者至少其一,否则 `start` 直接报错(零挂载的 `-NoRootWorkspace` 属配置不完整)。
+**workspace 挂载(唯一模式)**:状态目录常备 `mounts.example.txt` 模板(脚本运行时自动放置),复制为 `mounts.txt` 填好路径,每行一项(`路径` 或 `路径=子目录名`),**至少一项**——缺失/为空时 `start` 直接报错并提示建文件。`~/workspace` 在 VM 内是本地目录,每个宿主目录挂成其下的子目录。
 
 ```powershell
-.\scripts\launch.ps1 start -NoRootWorkspace                     # 读状态目录的 mounts.txt
-.\scripts\launch.ps1 start -NoRootWorkspace -ExtraMounts "D:\repo1","E:\repo2=alias2"
+.\scripts\launch.ps1 start        # 读状态目录的 mounts.txt,每项挂到 ~/workspace/<子目录>
 ```
 
-多目录模式必须 `-NoRootWorkspace`(Windows 上 Multipass 对嵌套挂载支持不稳);`-WorkspaceHost` 只在传统模式(单根)下用。
+不挂宿主根(嵌套挂载在 Windows Multipass 上不稳);**`~/workspace` 本身的内容在 delete VM 时会丢**(挂载子目录的内容在宿主机,不丢)。
 
 **可选特性(交互选择,不用记参数)**:可选特性(Tailscale、路径映射记忆等)**没有命令行开关**。真人 PowerShell 终端裸跑 `start` 会弹**方向键多选菜单**:↑↓ 移动高亮、空格 勾选/取消、回车 确认(数字键可直接切换某项,`a` 全选、`n` 全不选),选择持久化到状态目录 `features.txt`。直接回车 = 保持上次选择;不支持按键的终端(窗口过小/非 console 宿主)自动降级为编号输入;stdin 被重定向时(后台/管道/Claude 代跑)自动跳过菜单、静默沿用 `features.txt`(要改选择就编辑该文件)。新启用的"重建型"特性在 VM 已存在时会被探测到,交互询问是否立即 delete + 重建:答 `y` 一条命令完成(状态目录数据保留);答 `N`/回车跳过,VM 不动,下次 `delete + start` 才生效(收尾提示会注明包尚未装进 VM);非重建型特性(如路径映射记忆)不需重建,现有 VM 下次 `start` 即生效。特性清单见 [references/optional-features.md](references/optional-features.md)。
 
@@ -58,14 +51,9 @@ ssh -V                      # OpenSSH 客户端
 
 | 参数 | 默认 | 备注 |
 |---|---|---|
-| `-WorkspaceHost <目录>` | `""` → 状态目录 `workspace\` | 单根模式自定义宿主 workspace 源;须已存在,与 `-NoRootWorkspace` 互斥 |
-| `-StateDir <目录>` | `%USERPROFILE%\.cc-sandbox` | 可写状态目录(也受环境变量 `CC_SANDBOX_HOME` 影响) |
-| `-Image` / `-Cpus` / `-MemoryGB` / `-DiskGB` | `noble` / `4` / `8` / `30` | VM 资源,仅 `delete + start` 重建时生效 |
+| `-Cpus` / `-MemoryGB` / `-DiskGB` | `4` / `8` / `30` | VM 资源,仅 `delete + start` 重建时生效 |
 | `-CcSwitchPort <端口>` | `15721` | 本地代理端口(反向隧道目标),每次启动生效;未显式传时自动采信 base_url 里的端口 |
 | `-AptMirror <域名>` | `mirrors.aliyun.com` | VM 内 APT 镜像,渲染进 cloud-init,仅重建生效 |
-
-| `-ExtraMounts <列表>` | 空 | `"路径"` / `"路径=子目录"`;须配 `-NoRootWorkspace`;优先于 mounts.txt |
-| `-NoRootWorkspace` | 关 | 多目录模式:跳过根 workspace 挂载;必须有 mounts.txt 或 `-ExtraMounts`(至少一个挂载),否则报错 |
 
 首次 3–15 分钟(下载 Ubuntu 镜像 + cloud-init 装基础包;Node/Claude 从 bundle 离线装)。脚本会自动:开 privileged-mounts → 创建/唤醒 VM → 挂 `~/.claude`(RO)和 workspace → 起隧道(如需要)。
 
@@ -96,7 +84,7 @@ multipass exec claude-dev -- bash -lc "findmnt | grep /home/ubuntu/workspace"
 multipass exec claude-dev -- bash -lc "ls -la ~/workspace"
 ```
 
-传统单根模式应看到根 `/home/ubuntu/workspace` 一行 mount;多目录模式应看到各子目录的 mount 记录。
+应看到 mounts.txt 各项对应子目录的 mount 记录(不嵌套在宿主根挂载下)。
 
 ### 4. 用起来
 

@@ -9,8 +9,8 @@
         .\scripts\launch.ps1 status     # 看 VM 状态、隧道状态和已启用的可选特性
         .\scripts\launch.ps1 delete     # 删 VM + 清理(不会删状态目录里的 workspace/ 和 .ssh-key)
 
-    可写状态(bundle/workspace/mounts.txt/features.txt/.ssh-key/.tunnel.pid)在 $StateDir,默认
-    %USERPROFILE%\.cc-sandbox(可用参数 -StateDir 或环境变量 CC_SANDBOX_HOME 覆盖);
+    可写状态(bundle/workspace/mounts.txt/features.txt/.ssh-key/.tunnel.pid)固定在
+    %USERPROFILE%\.cc-sandbox(写死,不提供参数/环境变量更换);
     仓库根若有旧布局状态文件,首次运行自动拷入 $StateDir(原文件保留)。
 #>
 
@@ -19,36 +19,15 @@ param(
     [ValidateSet("start", "stop", "status", "delete")]
     [string]$Action = "start",
 
-    # 宿主机要挂进 VM ~/workspace 的目录;空 = 用项目下 ./workspace(默认,向后兼容)
-    # 仅用于传统单根模式(无 -NoRootWorkspace)
-    [Parameter()]
-    [string]$WorkspaceHost = "",
-
     # 可调配置(默认值就在此 param() 块)
-    [string]$Image     = "noble",       # Ubuntu 24.04 LTS
     [int]$Cpus         = 4,
     [int]$MemoryGB     = 8,
     [int]$DiskGB       = 30,
     [int]$CcSwitchPort = 15721,         # cc-switch 在宿主机监听的端口
 
-    [string]$AptMirror = "mirrors.aliyun.com", # VM 初始化时使用的 Ubuntu APT 镜像
+    [string]$AptMirror = "mirrors.aliyun.com" # VM 初始化时使用的 Ubuntu APT 镜像
     # 可选特性(tailscale 等)没有命令行开关:真人终端交互菜单选择,结果持久化到 features.txt
-
-    # 额外挂载列表,每项 "HostPath" 或 "HostPath=vmSubdir",挂到 ~/workspace/<vmSubdir>
-    # 简写时子目录名取宿主目录最后一级。传了此参数则不读 mounts.txt(参数优先)
-    # 必须配合 -NoRootWorkspace 使用(多目录模式:~/workspace 是 VM 本地目录)
-    [Parameter()]
-    [string[]]$ExtraMounts = @(),
-
-    # 跳过根 workspace 挂载(并卸掉已有根挂载)。开了它,~/workspace 就是 VM 本地目录,
-    # ExtraMounts/mounts.txt 的子目录挂载便不再"嵌套在另一个挂载里"
-    [Parameter()]
-    [switch]$NoRootWorkspace,
-
-    # 可写状态目录(bundle/workspace/mounts.txt/.ssh-key/.tunnel.pid/rendered yaml)
-    # 默认 %USERPROFILE%\.cc-sandbox;环境变量 CC_SANDBOX_HOME 可覆盖,显式传参优先
-    [Parameter()]
-    [string]$StateDir = ""
+    # workspace 挂载也没有参数:唯一模式,读状态目录 mounts.txt(见 Get-ExtraMountsSource)
 )
 
 # PS 5.1 把 native 命令的 stderr 当 terminating error,会让 multipass info(VM 不存在时)直接挂掉
@@ -64,15 +43,13 @@ Set-Location $scriptDir
 $assetsDir = (Get-Item (Join-Path $scriptDir '..\assets')).FullName
 if (-not (Test-Path (Join-Path $assetsDir 'cloud-init.yaml'))) { throw "assets 目录不完整: $assetsDir(skill 包损坏?)" }
 
-# 可写状态目录:skill 包外,重装/升级 skill 不影响用户数据
-if (-not $StateDir) {
-    $StateDir = if ($env:CC_SANDBOX_HOME) { $env:CC_SANDBOX_HOME } else { Join-Path $env:USERPROFILE '.cc-sandbox' }
-}
+# 可写状态目录:skill 包外,重装/升级 skill 不影响用户数据(写死,想换位置改这里)
+$StateDir = Join-Path $env:USERPROFILE '.cc-sandbox'
 if (-not (Test-Path $StateDir)) { New-Item -ItemType Directory -Path $StateDir -Force | Out-Null }
 
 # 一次性迁移:老布局把可写状态放在仓库根(scripts/ 的上级),检测到就拷入 $StateDir(不动原文件)
 $legacyRoot = Split-Path $scriptDir -Parent
-foreach ($name in @('bundle', 'workspace', 'mounts.txt', '.ssh-key', '.ssh-key.pub', '.tunnel.pid', '.cloud-init.rendered.yaml')) {
+foreach ($name in @('bundle', 'mounts.txt', '.ssh-key', '.ssh-key.pub', '.tunnel.pid', '.cloud-init.rendered.yaml')) {
     $old = Join-Path $legacyRoot $name
     $new = Join-Path $StateDir $name
     if ((Test-Path $old) -and -not (Test-Path $new)) {
@@ -93,9 +70,10 @@ $ccSwitchPortExplicit = $PSBoundParameters.ContainsKey('CcSwitchPort')
 
 # ====== 常量(不变项) ======
 $vmName         = "claude-dev"
+$vmImage        = "noble"                               # Ubuntu 24.04 LTS(换版本改这里)
 $mountClaudeHost = "/home/ubuntu/.claude-host"          # 宿主机 ~/.claude 挂到 VM 哪里
 $mountWorkspace = "/home/ubuntu/workspace"              # ./workspace 挂到 VM 哪里(放在 ~/ 下)
-# 可调项见 param() 块:$Image / $Cpus / $MemoryGB / $DiskGB / $CcSwitchPort / $AptMirror
+# 可调项见 param() 块:$Cpus / $MemoryGB / $DiskGB / $CcSwitchPort / $AptMirror
 
 # ====== 可选特性目录 ======
 # 交互菜单 / features.txt 持久化 / 收尾提示 / 重建确认全部由此驱动;
@@ -750,10 +728,9 @@ workspace 由宿主机挂载进来,同一文件两边路径不同;用户消息�
     Write-Ok "已写入宿主机↔VM 路径映射到 VM ~/.claude/CLAUDE.md($($Mappings.Count) 条)"
 }
 
-# ====== ExtraMounts:来源(参数优先,否则读 mounts.txt) ======
-# 返回 string[];无参数且配置文件不存在/为空 → 返回空数组(调用方跳过)
+# ====== ExtraMounts:来源(读 mounts.txt) ======
+# 返回 string[];配置文件不存在/为空 → 返回空数组(调用方跳过)
 function Get-ExtraMountsSource {
-    if ($ExtraMounts -and $ExtraMounts.Count -gt 0) { return @($ExtraMounts) }
     $cfg = Join-Path $StateDir "mounts.txt"
     if (-not (Test-Path $cfg)) { return @() }
     if (-not (Test-Path $cfg -PathType Leaf)) { throw "mounts.txt 不是普通文件: $cfg" }
@@ -777,7 +754,7 @@ function Resolve-ExtraMounts {
     $seenSubdirs = @{}
     foreach ($item in $Items) {
         if ([string]::IsNullOrWhiteSpace($item)) {
-            throw "-ExtraMounts 含空项。每项格式: HostPath 或 HostPath=vmSubdir"
+            throw "mounts.txt 含无效空项。每项格式: HostPath 或 HostPath=vmSubdir"
         }
 
         # 按第一个 '=' 切;无 '=' 时整项为 HostPath,子目录名取宿主目录最后一级
@@ -790,12 +767,12 @@ function Resolve-ExtraMounts {
             $vmSubdir = ""
         }
         if ([string]::IsNullOrWhiteSpace($hostRaw)) {
-            throw "-ExtraMounts 项 '$item' 宿主机路径为空。格式: HostPath 或 HostPath=vmSubdir"
+            throw "mounts.txt 项 '$item' 宿主机路径为空。格式: HostPath 或 HostPath=vmSubdir"
         }
 
         # 校验宿主源目录必须存在(先校验,简写取目录名也依赖它)
         if (-not (Test-Path $hostRaw -PathType Container)) {
-            throw "-ExtraMounts 项 '$item' 的宿主机目录不存在或不是目录: $hostRaw"
+            throw "mounts.txt 项 '$item' 的宿主机目录不存在或不是目录: $hostRaw"
         }
         $hostPath = (Resolve-Path $hostRaw).Path
 
@@ -808,19 +785,19 @@ function Resolve-ExtraMounts {
         $vmSubdir = $vmSubdir.Replace([char]92, [char]47)
         $vmSubdir = $vmSubdir.Trim('/')
         if ([string]::IsNullOrWhiteSpace($vmSubdir) -or $vmSubdir -eq '.') {
-            throw "-ExtraMounts 项 '$item' 的 vmSubdir 不能为空或 '.'(不能覆盖 workspace 根目录)"
+            throw "mounts.txt 项 '$item' 的 vmSubdir 不能为空或 '.'(不能覆盖 workspace 根目录)"
         }
         $segments = $vmSubdir -split '/'
         if ($segments -contains '.') {
-            throw "-ExtraMounts 项 '$item' 的 vmSubdir 不允许含 '.'(必须是 workspace 下的真实子目录): $vmSubdir"
+            throw "mounts.txt 项 '$item' 的 vmSubdir 不允许含 '.'(必须是 workspace 下的真实子目录): $vmSubdir"
         }
         if ($vmSubdir -match '(^|/)\.\.(/|$)') {
-            throw "-ExtraMounts 项 '$item' 的 vmSubdir 不允许含 '..'(防逃逸出 workspace): $vmSubdir"
+            throw "mounts.txt 项 '$item' 的 vmSubdir 不允许含 '..'(防逃逸出 workspace): $vmSubdir"
         }
 
         # 子目录名冲突(两项映射到同一子目录)
         if ($seenSubdirs.ContainsKey($vmSubdir)) {
-            throw "-ExtraMounts 子目录名重复: '$vmSubdir' 同时被 '$($seenSubdirs[$vmSubdir])' 和 '$hostPath' 使用"
+            throw "mounts.txt 子目录名重复: '$vmSubdir' 同时被 '$($seenSubdirs[$vmSubdir])' 和 '$hostPath' 使用"
         }
         $seenSubdirs[$vmSubdir] = $hostPath
 
@@ -834,7 +811,7 @@ function Resolve-ExtraMounts {
 }
 
 # ====== ExtraMounts:实际挂载 ======
-# 仅在 ~/workspace 是 VM 本地目录时调用(即 -NoRootWorkspace),避免嵌套挂载
+# 前提:~/workspace 是 VM 本地目录(不挂宿主根),子目录挂载才不会嵌套
 function Mount-ExtraMounts {
     param([Parameter(Mandatory)] [array]$Mounts)
 
@@ -856,7 +833,7 @@ function Mount-ExtraMounts {
         }
 
         # 2) 每次先卸载目标的旧映射再重挂:findmnt 只能证明目标被挂载,不能证明
-        #    它仍对应当前 mounts.txt/-ExtraMounts 声明的宿主源目录
+        #    它仍对应当前 mounts.txt 声明的宿主源目录
         $null = Invoke-Multipass -ArgumentList @('umount', "${vmName}:${target}") -TimeoutSec 30
 
         # 3) 走 Try-Mount:自带 snap-install-progress 自救(首个 mount 触发 lazy install
@@ -864,7 +841,7 @@ function Mount-ExtraMounts {
         #    + already-mounted 幂等 + 失败重试
         $mounted = Try-Mount -MountArgs @('mount', $src, "${vmName}:${target}") `
                              -Description "挂载 $src → $target" `
-                             -FailureHint "(重新运行 .\launch.ps1 start -NoRootWorkspace 会再次尝试清理并挂载)" `
+                             -FailureHint "(重新运行 .\launch.ps1 start 会再次尝试清理并挂载)" `
                              -VmTarget $target
 
         # 4) findmnt 双重确认:Try-Mount 报 OK 不代表真挂上(Multipass 偶尔报告 OK 但 findmnt 无)
@@ -991,24 +968,14 @@ function Confirm-RebuildForFeatures {
 function Start-ClaudeDev {
     Assert-Prerequisites
 
-    # 多目录挂载参数校验 + 解析(在动 VM 前先 fail fast,避免无效参数触发 daemon 重启等副作用)
+    # mounts.txt 解析 + 校验(在动 VM 前先 fail fast,避免无效配置触发 daemon 重启等副作用)
+    # start 只有唯一的挂载模式:~/workspace 保持 VM 本地目录,mounts.txt 每项挂成一个子目录
     $extraItems = Get-ExtraMountsSource
-    if ($NoRootWorkspace -and $WorkspaceHost) {
-        throw "-NoRootWorkspace 与 -WorkspaceHost 不能同时使用。前者用 -ExtraMounts/mounts.txt 挂子目录,后者只用于传统单根 workspace 挂载"
-    }
-    if (-not $NoRootWorkspace -and $extraItems.Count -gt 0) {
-        throw "检测到 mounts.txt 或 -ExtraMounts,但普通 start 会产生嵌套挂载。请加 -NoRootWorkspace,或移除额外挂载后再用普通 start"
-    }
-    # -WorkspaceHost 校验也属 fail-fast:若放在挂载段(Stop-Tunnel 之后)才 throw,
-    # 参数错误会先杀掉活隧道再退出,留下"隧道已死"的状态
-    if ($WorkspaceHost -and -not (Test-Path $WorkspaceHost -PathType Container)) {
-        throw "-WorkspaceHost 必须是已存在的目录: $WorkspaceHost"
-    }
     $resolvedExtraMounts = if ($extraItems.Count -gt 0) { Resolve-ExtraMounts -Items $extraItems } else { @() }
-    # 零挂载的 -NoRootWorkspace 属配置不完整:VM workspace 会是本地空目录,
-    # path-map 也无映射可写(勾选了却不生效)。与上面两条校验同风格,启动前拦下
-    if ($NoRootWorkspace -and $resolvedExtraMounts.Count -eq 0) {
-        throw "-NoRootWorkspace 需要至少一个挂载:$StateDir\mounts.txt 不存在或为空,且未传 -ExtraMounts。把 $StateDir\mounts.example.txt 复制为 mounts.txt,填入宿主目录(每行一个)后重跑;或直接传 -ExtraMounts"
+    # mounts.txt 缺失/为空属配置不完整:VM workspace 会是本地空目录,
+    # path-map 也无映射可写(勾选了却不生效),启动前拦下
+    if ($resolvedExtraMounts.Count -eq 0) {
+        throw "start 需要 mounts.txt 配置挂载:$StateDir\mounts.txt 不存在或为空。把 $StateDir\mounts.example.txt 复制为 mounts.txt,填入宿主目录(每行一个)后重跑"
     }
 
     # 可选特性:交互菜单(真人终端)> features.txt;选择统一写回 features.txt(重建后不丢)
@@ -1073,7 +1040,7 @@ function Start-ClaudeDev {
                         "--cloud-init", $renderedPath,
                         "--timeout", "1200")
         # 不在 multipass launch 阶段传 bundle；先完成基础 cloud-init,再由后续流程 transfer 并安装。
-        $launchArgs += $image
+        $launchArgs += $vmImage
         # 不自动重置 daemon(1.14.1 稳定);launch 失败如实报错,见 troubleshooting.md §F
         # --timeout 1200 把 multipass CLI 自己的超时从默认 5 分钟拉到 20 分钟
         # PS 端给 1300s 留 100s 缓冲,让 multipass 的 --timeout 先触发(而不是 PS 硬杀)
@@ -1160,66 +1127,33 @@ function Start-ClaudeDev {
     # 失败只 warning(RW 仍可用),不阻塞后续流程
     $null = Set-HostMountReadOnly -Target $mountClaudeHost
 
-    # 挂载 workspace —— 两种模式互斥
-    if ($NoRootWorkspace) {
-        # 多目录模式:不挂根 workspace,卸掉已有根挂载,~/workspace 保持 VM 本地目录
-        # 只挂 mounts.txt/-ExtraMounts 声明的子目录(不做根 workspace 宿主挂载)
-        Write-Step "跳过根 workspace 挂载(-NoRootWorkspace),卸掉已有根挂载..."
-        # 90s:慢网络 + cloud-init 在跑时 umount 也可能慢;30s 实测不够,会连锁 throw
-        $unmountRoot = Invoke-Multipass -ArgumentList @('umount', "${vmName}:${mountWorkspace}") -TimeoutSec 90
-        if ($unmountRoot.TimedOut) {
-            throw "根 workspace 卸载超时,停止启动以避免嵌套挂载"
-        }
-        $mkRoot = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'mkdir', '-p', $mountWorkspace) -TimeoutSec 30
-        if ($mkRoot.ExitCode -ne 0 -or $mkRoot.TimedOut) {
-            throw "无法创建 VM 本地 workspace 根目录,停止启动"
-        }
-        if (Test-VMTargetMounted -Target $mountWorkspace) {
-            throw "根 workspace 仍是宿主机挂载,停止启动以避免嵌套挂载。请检查 Multipass 挂载状态后重试"
-        }
-        Write-Ok "$mountWorkspace 保持 VM 本地(为 ExtraMounts 子目录挂载做准备)"
-    } else {
-        Write-Step "挂载 workspace → VM $mountWorkspace..."
-        if ($WorkspaceHost) {
-            # 用户显式指定宿主机 workspace 目录(存在性已在开头 fail-fast 校验过,不自动创建)
-            $wsHost = (Resolve-Path $WorkspaceHost).Path
-            Write-Step "使用自定义 workspace 源: $wsHost"
-        } else {
-            # 默认:项目下 ./workspace(保持原行为)
-            $wsHost = Join-Path $StateDir "workspace"
-            if (-not (Test-Path $wsHost)) {
-                New-Item -ItemType Directory -Path $wsHost | Out-Null
-                Write-Warn "workspace/ 不存在,已新建空目录"
-            }
-        }
-        # 换源时清掉 VM 内 ~/workspace 旧挂载,避免"目标已被占用"冲突(首次 umount 失败忽略)
-        $null = Invoke-Multipass -ArgumentList @('umount', "${vmName}:${mountWorkspace}") -TimeoutSec 30
-        $null = Try-Mount -MountArgs @('mount', $wsHost, "${vmName}:${mountWorkspace}") `
-                          -Description "挂载 workspace" `
-                          -FailureHint "(中文路径 $wsHost 若挂不上,见 references/troubleshooting.md;继续)" `
-                          -VmTarget $mountWorkspace
+    # workspace 挂载(唯一模式):~/workspace 保持 VM 本地目录,只挂 mounts.txt 声明的子目录。
+    # 不做根 workspace 宿主挂载 —— 往已挂载目录内部再挂(嵌套挂载)在 Windows Multipass 上不稳
+    Write-Step "准备 VM 本地 $mountWorkspace(卸掉遗留的根挂载)..."
+    # 90s:慢网络 + cloud-init 在跑时 umount 也可能慢;30s 实测不够,会连锁 throw
+    $unmountRoot = Invoke-Multipass -ArgumentList @('umount', "${vmName}:${mountWorkspace}") -TimeoutSec 90
+    if ($unmountRoot.TimedOut) {
+        throw "根 workspace 卸载超时,停止启动以避免嵌套挂载"
     }
+    $mkRoot = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'mkdir', '-p', $mountWorkspace) -TimeoutSec 30
+    if ($mkRoot.ExitCode -ne 0 -or $mkRoot.TimedOut) {
+        throw "无法创建 VM 本地 workspace 根目录,停止启动"
+    }
+    if (Test-VMTargetMounted -Target $mountWorkspace) {
+        throw "根 workspace 仍是宿主机挂载,停止启动以避免嵌套挂载。请检查 Multipass 挂载状态后重试"
+    }
+    Write-Ok "$mountWorkspace 保持 VM 本地(为 mounts.txt 子目录挂载做准备)"
 
-    # ExtraMounts:仅在 -NoRootWorkspace 下挂到 VM 本地 workspace 子目录
-    if ($resolvedExtraMounts.Count -gt 0) {
-        if (-not (Mount-ExtraMounts -Mounts $resolvedExtraMounts)) {
-            throw "一个或多个额外挂载失败,停止启动以避免 workspace 数据位置不确定"
-        }
+    # mounts.txt 挂载:挂到 VM 本地 workspace 子目录
+    if (-not (Mount-ExtraMounts -Mounts $resolvedExtraMounts)) {
+        throw "一个或多个额外挂载失败,停止启动以避免 workspace 数据位置不确定"
     }
 
     # 可选特性 path-map(非重建型,现有 VM 立即生效):挂载已定,按实际映射生成说明块
     if ($enabledFeatures -contains 'path-map') {
-        $pathMappings = @()
-        if ($NoRootWorkspace) {
-            foreach ($m in $resolvedExtraMounts) {
-                $pathMappings += @{ HostPrefix = $m.HostPath; VmPath = $m.Target }
-            }
-        } else {
-            # $wsHost 在上面单根挂载分支赋值(PS 无块作用域,函数级可见)
-            $pathMappings += @{ HostPrefix = $wsHost; VmPath = $mountWorkspace }
-        }
-        # 零挂载已在开头 fail-fast(多目录),单根模式恒有 $wsHost,$pathMappings 必非空
-        Set-VMClaudeMemory -Mappings $pathMappings
+        # 映射恒非空:开头已 fail-fast 保证 mounts.txt 至少一项
+        $pathMappings = foreach ($m in $resolvedExtraMounts) { @{ HostPrefix = $m.HostPath; VmPath = $m.Target } }
+        Set-VMClaudeMemory -Mappings @($pathMappings)
     } else {
         # 取消勾选时移除旧块,VM 内状态与勾选保持一致(幂等,无块时无操作)
         Set-VMClaudeMemory -Remove
@@ -1357,7 +1291,7 @@ function Delete-ClaudeDev {
     Write-Step "删 VM..."
     Invoke-VmActionGraceful -MultipassArgs @('delete', '--purge', $vmName) -DoneMsg "VM 已删除并清理"
     Write-Host ""
-    Write-Host "保留: 状态目录($StateDir)里的 workspace/、.ssh-key、.ssh-key.pub(下次 start 复用)" -ForegroundColor Green
+    Write-Host "保留: 状态目录($StateDir)里的 mounts.txt、features.txt、bundle、.ssh-key(下次 start 复用)" -ForegroundColor Green
 }
 
 # ====== 路由 ======

@@ -1,4 +1,4 @@
-# 多目录挂载示例 —— 复制为本地 mounts.txt 后改成你自己的路径
+# 挂载配置示例 —— 复制为本地 mounts.txt 后改成你自己的路径(至少一项,否则 start 报错)
 # 每行一项,格式:HostPath 或 HostPath=vmSubdir
 # 简写时子目录名取宿主目录最后一级
 # `#` 起始为注释,空行忽略
@@ -8,5 +8,5 @@
 # E:\work\another-repo=alias
 #
 # 用法:复制为 状态目录\mounts.txt(默认 %USERPROFILE%\.cc-sandbox\mounts.txt)后改成自己的路径,
-#       再 .\scripts\launch.ps1 start -NoRootWorkspace 自动读取,子目录挂到 ~/workspace 下
+#       再 .\scripts\launch.ps1 start 自动读取,子目录挂到 ~/workspace 下
 # mounts.txt 放在状态目录(skill 包外),不进仓库
