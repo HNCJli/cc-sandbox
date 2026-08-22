@@ -111,7 +111,7 @@ function Show-FeatureMenuTui {
     # 窗口放不下整个菜单块:一个字都不打,直接让调用方走编号输入
     if ([Console]::WindowHeight - $blockH -lt 2) { return $null }
 
-    $title = "可选特性(勾选后预装进 VM)"
+    $title = "可选特性(空格勾选;重建型特性需 delete + start 才生效)"
     $hint1 = "↑↓ 移动   空格 勾选/取消   回车 确认   a=全选   n=全不选"
     $hint2 = "选择保存到 $StateDir\features.txt,下次 start 自动沿用"
     $menuTop = [Console]::CursorTop
@@ -193,7 +193,7 @@ function Select-OptionalFeatures {
         Write-Host "    (当前终端放不下按键式菜单,改为编号输入)" -ForegroundColor DarkGray
     }
     Write-Host ""
-    Write-Step "可选特性(勾选后预装进 VM;选择会保存到 $StateDir\features.txt,下次 start 自动沿用)"
+    Write-Step "可选特性(勾选后生效;选择会保存到 $StateDir\features.txt,下次 start 自动沿用)"
     for ($i = 0; $i -lt $optionalFeatures.Count; $i++) {
         $f = $optionalFeatures[$i]
         $mark   = if ($Current -contains $f.Id) { "[x]" } else { "[ ]" }

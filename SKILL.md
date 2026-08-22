@@ -47,13 +47,7 @@ ssh -V                      # OpenSSH 客户端
 
 **可选特性(交互选择,不用记参数)**:可选特性(Tailscale、路径映射记忆等)**没有命令行开关**。真人 PowerShell 终端裸跑 `start` 会弹**方向键多选菜单**:↑↓ 移动高亮、空格 勾选/取消、回车 确认(数字键可直接切换某项,`a` 全选、`n` 全不选),选择持久化到状态目录 `features.txt`。直接回车 = 保持上次选择;不支持按键的终端(窗口过小/非 console 宿主)自动降级为编号输入;stdin 被重定向时(后台/管道/Claude 代跑)自动跳过菜单、静默沿用 `features.txt`(要改选择就编辑该文件)。新启用的"重建型"特性在 VM 已存在时会被探测到,交互询问是否立即 delete + 重建:答 `y` 一条命令完成(状态目录数据保留);答 `N`/回车跳过,VM 不动,下次 `delete + start` 才生效(收尾提示会注明包尚未装进 VM);非重建型特性(如路径映射记忆)不需重建,现有 VM 下次 `start` 即生效。特性清单见 [references/optional-features.md](references/optional-features.md)。
 
-**`start` 全部参数**(权威来源:`scripts\launch.ps1` 顶部 `param()` 块):
-
-| 参数 | 默认 | 备注 |
-|---|---|---|
-| `-Cpus` / `-MemoryGB` / `-DiskGB` | `4` / `8` / `30` | VM 资源,仅 `delete + start` 重建时生效 |
-| `-CcSwitchPort <端口>` | `15721` | 本地代理端口(反向隧道目标),每次启动生效;未显式传时自动采信 base_url 里的端口 |
-| `-AptMirror <域名>` | `mirrors.aliyun.com` | VM 内 APT 镜像,渲染进 cloud-init,仅重建生效 |
+**`start` 全部参数**(共 5 个,均为可选:资源 3 个 + 端口 + APT 镜像):完整参数表见 [references/parameters.md](references/parameters.md)。权威来源:`scripts\launch.ps1` 顶部 `param()` 块。
 
 首次 3–15 分钟(下载 Ubuntu 镜像 + cloud-init 装基础包;Node/Claude 从 bundle 离线装)。脚本会自动:开 privileged-mounts → 创建/唤醒 VM → 挂 `~/.claude`(RO)和 workspace → 起隧道(如需要)。
 

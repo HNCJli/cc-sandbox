@@ -1,6 +1,6 @@
 #cloud-init
 # 由 launch.ps1 渲染后再喂给 multipass launch --cloud-init
-# 占位符(渲染时由 launch.ps1 替换):TMUX_CONF_PLACEHOLDER, SSH_PUBKEY_PLACEHOLDER, TAILSCALE_BLOCK, APT_MIRROR_PLACEHOLDER, STATUSLINE_PLACEHOLDER
+# 占位符(渲染时由 launch.ps1 替换):TMUX_CONF_PLACEHOLDER, SSH_PUBKEY_PLACEHOLDER, TAILSCALE_BLOCK, APT_MIRROR_PLACEHOLDER, STATUSLINE_PLACEHOLDER, BASE_PACKAGES_RUNCMD
 # (注意:注释里别出现 {{XXX}} 形式的占位符,launch.ps1 的 .Replace 会连注释一起替换;不带花括号的裸名安全)
 
 hostname: claude-dev
@@ -140,25 +140,11 @@ runcmd:
   - touch /run/claude-dev/events
   - printf '%s\n' 'event=stage:1|[1/6] 安装系统基础包' >> /run/claude-dev/events
   - printf '%s\n' 'stage=1' 'package=0' 'package_name=starting' > /run/claude-dev/progress
-  # 系统包逐个安装；packages 文件记录全部已完成包，避免快速步骤被轮询错过
-  - apt-get install -y git && printf '%s\n' git >> /run/claude-dev/packages && printf '%s\n' 'stage=1' 'package=1' 'package_name=git' > /run/claude-dev/progress
-  - apt-get install -y curl && printf '%s\n' curl >> /run/claude-dev/packages && printf '%s\n' 'stage=1' 'package=2' 'package_name=curl' > /run/claude-dev/progress
-  - apt-get install -y wget && printf '%s\n' wget >> /run/claude-dev/packages && printf '%s\n' 'stage=1' 'package=3' 'package_name=wget' > /run/claude-dev/progress
-  - apt-get install -y vim && printf '%s\n' vim >> /run/claude-dev/packages && printf '%s\n' 'stage=1' 'package=4' 'package_name=vim' > /run/claude-dev/progress
-  - apt-get install -y less && printf '%s\n' less >> /run/claude-dev/packages && printf '%s\n' 'stage=1' 'package=5' 'package_name=less' > /run/claude-dev/progress
-  - apt-get install -y jq && printf '%s\n' jq >> /run/claude-dev/packages && printf '%s\n' 'stage=1' 'package=6' 'package_name=jq' > /run/claude-dev/progress
-  - apt-get install -y ripgrep && printf '%s\n' ripgrep >> /run/claude-dev/packages && printf '%s\n' 'stage=1' 'package=7' 'package_name=ripgrep' > /run/claude-dev/progress
-  - apt-get install -y fd-find && printf '%s\n' fd-find >> /run/claude-dev/packages && printf '%s\n' 'stage=1' 'package=8' 'package_name=fd-find' > /run/claude-dev/progress
-  - apt-get install -y tmux && printf '%s\n' tmux >> /run/claude-dev/packages && printf '%s\n' 'stage=1' 'package=9' 'package_name=tmux' > /run/claude-dev/progress
-  - apt-get install -y fish && printf '%s\n' fish >> /run/claude-dev/packages && printf '%s\n' 'stage=1' 'package=10' 'package_name=fish' > /run/claude-dev/progress
+  # 基础包逐个安装块由 launch.ps1 按 $basePackages 清单渲染(单一来源,与进度显示同源)。
+  # 勿在此手写包行——增减基础包改 launch.ps1 的 $basePackages。
+  # packages 文件记录全部已完成包，避免快速步骤被轮询错过
+{{BASE_PACKAGES_RUNCMD}}
   - chsh -s /usr/bin/fish ubuntu
-  - apt-get install -y fzf && printf '%s\n' fzf >> /run/claude-dev/packages && printf '%s\n' 'stage=1' 'package=11' 'package_name=fzf' > /run/claude-dev/progress
-  - apt-get install -y zoxide && printf '%s\n' zoxide >> /run/claude-dev/packages && printf '%s\n' 'stage=1' 'package=12' 'package_name=zoxide' > /run/claude-dev/progress
-  - apt-get install -y openssh-server && printf '%s\n' openssh-server >> /run/claude-dev/packages && printf '%s\n' 'stage=1' 'package=13' 'package_name=openssh-server' > /run/claude-dev/progress
-  - apt-get install -y sudo && printf '%s\n' sudo >> /run/claude-dev/packages && printf '%s\n' 'stage=1' 'package=14' 'package_name=sudo' > /run/claude-dev/progress
-  - apt-get install -y locales && printf '%s\n' locales >> /run/claude-dev/packages && printf '%s\n' 'stage=1' 'package=15' 'package_name=locales' > /run/claude-dev/progress
-  - apt-get install -y ca-certificates && printf '%s\n' ca-certificates >> /run/claude-dev/packages && printf '%s\n' 'stage=1' 'package=16' 'package_name=ca-certificates' > /run/claude-dev/progress
-  - printf '%s\n' 'stage=1' 'package=16' 'package_name=done' > /run/claude-dev/progress
   # 追加 launch.ps1 生成的公钥到现有 authorized_keys
   # (不能用 write_files,会覆盖 Multipass 自带 key,把 multipass exec/shell 弄坏)
   - echo "{{SSH_PUBKEY_PLACEHOLDER}}" >> /home/ubuntu/.ssh/authorized_keys

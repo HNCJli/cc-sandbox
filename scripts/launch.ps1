@@ -9,9 +9,8 @@
         .\scripts\launch.ps1 status     # 看 VM 状态、隧道状态和已启用的可选特性
         .\scripts\launch.ps1 delete     # 删 VM + 清理(不会删状态目录里的 workspace/ 和 .ssh-key)
 
-    可写状态(bundle/workspace/mounts.txt/features.txt/.ssh-key/.tunnel.pid)固定在
-    %USERPROFILE%\.cc-sandbox(写死,不提供参数/环境变量更换);
-    仓库根若有旧布局状态文件,首次运行自动拷入 $StateDir(原文件保留)。
+    可写状态(bundle/mounts.txt/features.txt/.ssh-key/.tunnel.pid)固定在
+    %USERPROFILE%\.cc-sandbox(写死,不提供参数/环境变量更换)。
 #>
 
 param(
@@ -27,7 +26,7 @@ param(
 
     [string]$AptMirror = "mirrors.aliyun.com" # VM 初始化时使用的 Ubuntu APT 镜像
     # 可选特性(tailscale 等)没有命令行开关:真人终端交互菜单选择,结果持久化到 features.txt
-    # workspace 挂载也没有参数:唯一模式,读状态目录 mounts.txt(见 Get-ExtraMountsSource)
+    # workspace 挂载也没有参数:唯一模式,读状态目录 mounts.txt(见 Get-MountEntries)
 )
 
 # PS 5.1 把 native 命令的 stderr 当 terminating error,会让 multipass info(VM 不存在时)直接挂掉
@@ -47,17 +46,6 @@ if (-not (Test-Path (Join-Path $assetsDir 'cloud-init.yaml'))) { throw "assets �
 $StateDir = Join-Path $env:USERPROFILE '.cc-sandbox'
 if (-not (Test-Path $StateDir)) { New-Item -ItemType Directory -Path $StateDir -Force | Out-Null }
 
-# 一次性迁移:老布局把可写状态放在仓库根(scripts/ 的上级),检测到就拷入 $StateDir(不动原文件)
-$legacyRoot = Split-Path $scriptDir -Parent
-foreach ($name in @('bundle', 'mounts.txt', '.ssh-key', '.ssh-key.pub', '.tunnel.pid', '.cloud-init.rendered.yaml')) {
-    $old = Join-Path $legacyRoot $name
-    $new = Join-Path $StateDir $name
-    if ((Test-Path $old) -and -not (Test-Path $new)) {
-        Copy-Item -Path $old -Destination $new -Recurse -Force
-        Write-Host "    迁移旧布局状态: $name → $new(原文件保留,可手动清理)" -ForegroundColor DarkGray
-    }
-}
-
 # 状态目录常备 mounts.txt 模板(用户复制/改名为 mounts.txt 后填自己的路径;幂等,已存在不覆盖)
 $mountsExampleSrc = Join-Path $assetsDir 'mounts.example.txt'
 $mountsExampleDst = Join-Path $StateDir 'mounts.example.txt'
@@ -74,6 +62,22 @@ $vmImage        = "noble"                               # Ubuntu 24.04 LTS(换�
 $mountClaudeHost = "/home/ubuntu/.claude-host"          # 宿主机 ~/.claude 挂到 VM 哪里
 $mountWorkspace = "/home/ubuntu/workspace"              # ./workspace 挂到 VM 哪里(放在 ~/ 下)
 # 可调项见 param() 块:$Cpus / $MemoryGB / $DiskGB / $CcSwitchPort / $AptMirror
+
+# cloud-init 基础包清单(单一来源:渲染进 cloud-init runcmd,progress.ps1 的 [x/N] 计数同源;
+# 增减基础包只改这里,别去动 cloud-init.yaml 的 {{BASE_PACKAGES_RUNCMD}} 块)
+$basePackages = @(
+    'git', 'curl', 'wget', 'vim', 'less', 'jq', 'ripgrep', 'fd-find',
+    'tmux', 'fish', 'fzf', 'zoxide', 'openssh-server', 'sudo', 'locales', 'ca-certificates'
+)
+
+# bundle 必需组件清单(单一来源:Test-BundleReady 的宿主侧校验、VM 内 $bundleKeyFiles 校验都由它生成;
+# 是相对 $StateDir 的 glob,PS 与 bash 通配语法兼容。加新组件:这里加一行 + install-bundle.sh 接安装)
+$bundleKeyGlobs = @(
+    'bundle/node-v*-linux-x64.tar.xz',
+    'bundle/anthropic-ai-claude-code-[0-9]*.tgz',          # wrapper([0-9] 排除 linux-x64 变体)
+    'bundle/anthropic-ai-claude-code-linux-x64-*.tgz',
+    'bundle/cc-pocket/cc-pocket-daemon-*-linux-x86_64.tar.gz'
+)
 
 # ====== 可选特性目录 ======
 # 交互菜单 / features.txt 持久化 / 收尾提示 / 重建确认全部由此驱动;
@@ -107,6 +111,15 @@ $optionalFeatures = @(
 function Write-Step($msg) { Write-Host "==> $msg" -ForegroundColor Cyan }
 function Write-Ok($msg)   { Write-Host "    OK  $msg" -ForegroundColor Green }
 function Write-Warn($msg) { Write-Host "    !   $msg" -ForegroundColor Yellow }
+
+# native 命令参数拼接:含空格/引号的 token 加引号并转义内层引号。
+# PS 5.1 手工拼 ProcessStartInfo.Arguments / Start-Process -ArgumentList 都只按空格 join,必须自己处理
+function Join-ProcessArguments {
+    param([Parameter(Mandatory)] [string[]]$Arguments)
+    return ($Arguments | ForEach-Object {
+        if ($_ -match '[\s"]') { '"' + ($_ -replace '"','\"') + '"' } else { $_ }
+    }) -join ' '
+}
 
 # ====== cloud-init 安全进度 ======
 # 只读取 cloud-init 写入的固定进度文件,不转发原始日志,避免泄露 token/环境变量
@@ -219,9 +232,7 @@ function Invoke-MultipassLaunchWithProgress {
     if (-not $script:multipassExe) { $script:multipassExe = (Get-Command multipass -ErrorAction Stop).Source }
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $script:multipassExe
-    $psi.Arguments = ($ArgumentList | ForEach-Object {
-        if ($_ -match '[\s"]') { '"' + ($_ -replace '"','\"') + '"' } else { $_ }
-    }) -join ' '
+    $psi.Arguments = Join-ProcessArguments -Arguments $ArgumentList
     $psi.UseShellExecute = $false
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
@@ -271,10 +282,7 @@ function Invoke-Multipass {
 
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $script:multipassExe
-    # 拼接 args,含空格/引号的加引号转义(multipass 参数多为简单 token,workspace 路径可能含空格)
-    $psi.Arguments = ($ArgumentList | ForEach-Object {
-        if ($_ -match '[\s"]') { '"' + ($_ -replace '"','\"') + '"' } else { $_ }
-    }) -join ' '
+    $psi.Arguments = Join-ProcessArguments -Arguments $ArgumentList
     $psi.UseShellExecute = $false
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
@@ -475,20 +483,16 @@ function Get-VmState { (Get-VmRecord).State }
 function Get-VmIp { (Get-VmRecord).IPv4 }
 
 # ====== Bundle 检测 ======
-# 检测 bundle/ 是否齐全(Node tarball + Claude wrapper + Claude Linux 二进制 + cc-pocket)
+# 检测 bundle/ 是否齐全(组件清单见 $bundleKeyGlobs)
 # 项目只走离线 bundle 安装,不齐 → start 直接报错(不做在线降级)
 function Test-BundleReady {
-    $bundleDir = Join-Path $StateDir 'bundle'
-    if (-not (Test-Path $bundleDir)) { return $false }
-    $hasNode  = Get-ChildItem $bundleDir -Filter 'node-v*-linux-x64.tar.xz' -ErrorAction SilentlyContinue |
-                Select-Object -First 1
-    $hasWrap  = Get-ChildItem $bundleDir -Filter 'anthropic-ai-claude-code-*.tgz' -ErrorAction SilentlyContinue |
-                Where-Object { $_.Name -notmatch 'linux-x64' } | Select-Object -First 1
-    $hasLinux = Get-ChildItem $bundleDir -Filter 'anthropic-ai-claude-code-linux-x64-*.tgz' -ErrorAction SilentlyContinue |
-                Select-Object -First 1
-    $hasCc    = Get-ChildItem (Join-Path $bundleDir 'cc-pocket') -Filter 'cc-pocket-daemon-*-linux-x86_64.tar.gz' -ErrorAction SilentlyContinue |
-                Select-Object -First 1
-    return -not (-not $hasNode -or -not $hasWrap -or -not $hasLinux -or -not $hasCc)
+    # 注意用 -Path(PS 原生通配)而非 -Filter:Win32 -Filter 不支持 [0-9] 字符类,wrapper 的
+    # 排除 glob 会静默匹配失败
+    foreach ($g in $bundleKeyGlobs) {
+        $full = Join-Path $StateDir ($g -replace '/', '\')
+        if (-not (Get-ChildItem -Path $full -ErrorAction SilentlyContinue | Select-Object -First 1)) { return $false }
+    }
+    return $true
 }
 
 # ====== 渲染 cloud-init ======
@@ -511,12 +515,13 @@ function Render-CloudInit {
     $tmuxRaw  = [System.IO.File]::ReadAllText($tmuxPath, [System.Text.Encoding]::UTF8)
     $statuslineRaw = [System.IO.File]::ReadAllText($statuslinePath, [System.Text.Encoding]::UTF8)
 
-    # YAML block scalar 缩进:cloud-init.yaml 占位符所在 content: | 块是 6 空格缩进
-    $tmuxIndented = (($tmuxRaw -split "`r?`n") | ForEach-Object { "      " + $_ }) -join "`n"
-    # 去掉末尾多余空行,避免 YAML 末尾混乱
-    $tmuxIndented = $tmuxIndented.TrimEnd("`n")
-    $statuslineIndented = (($statuslineRaw -split "`r?\n") | ForEach-Object { "      " + $_ }) -join "`n"
-    $statuslineIndented = $statuslineIndented.TrimEnd("`n")
+    # YAML block scalar 缩进辅助:每行加 6 空格(cloud-init.yaml 占位符所在 content: | 块),去尾空行
+    function ConvertTo-IndentedBlock {
+        param([Parameter(Mandatory)] [string]$Text)
+        ((($Text -split "`r?`n") | ForEach-Object { '      ' + $_ }) -join "`n").TrimEnd("`n")
+    }
+    $tmuxIndented = ConvertTo-IndentedBlock $tmuxRaw
+    $statuslineIndented = ConvertTo-IndentedBlock $statuslineRaw
 
     $pubKeyPath = Join-Path $StateDir ".ssh-key.pub"
     if (-not (Test-Path $pubKeyPath)) { throw ".ssh-key.pub 不存在,Start 流程漏了 keygen 步?" }
@@ -526,6 +531,15 @@ function Render-CloudInit {
     $rendered = $rendered.Replace('{{STATUSLINE_PLACEHOLDER}}', $statuslineIndented)
     # SSH_PUBKEY 现在在 runcmd 的 echo "..." 里,不需要缩进
     $rendered = $rendered.Replace('{{SSH_PUBKEY_PLACEHOLDER}}', $pubKey)
+
+    # 基础包逐个安装的 runcmd 块:按 $basePackages 清单生成(2 空格缩进对齐 runcmd 列表项)。
+    # 每包记录 packages 文件(防快速步骤被轮询错过)+ progress 信号;末尾 done 信号收尾
+    $pkgLines = for ($i = 0; $i -lt $basePackages.Count; $i++) {
+        $p = $basePackages[$i]
+        "  - apt-get install -y $p && printf '%s\n' $p >> /run/claude-dev/packages && printf '%s\n' 'stage=1' 'package=$($i + 1)' 'package_name=$p' > /run/claude-dev/progress"
+    }
+    $pkgLines += "  - printf '%s\n' 'stage=1' 'package=$($basePackages.Count)' 'package_name=done' > /run/claude-dev/progress"
+    $rendered = $rendered.Replace('{{BASE_PACKAGES_RUNCMD}}', ($pkgLines -join "`n"))
 
     # 各可选特性的注入块:按 Id 判断,块内容替换 cloud-init.yaml 里的 {{XXX_BLOCK}} 占位符(2 空格缩进
     # 对齐 runcmd 列表项),未启用替换成空字符串(留空行不影响 YAML 解析)
@@ -599,7 +613,7 @@ function Stop-Tunnel {
     Remove-Item $pidFile -Force -ErrorAction SilentlyContinue
 }
 
-# ====== ExtraMounts 辅助:findmnt 验证挂载点真挂上了 ======
+# ====== 挂载辅助:findmnt 验证挂载点真挂上了 ======
 # multipass mount 输出不可靠(already mounted 误报等),用 VM 内 findmnt 才是真相
 function Test-VMTargetMounted {
     param([Parameter(Mandatory)] [string]$Target)
@@ -728,9 +742,9 @@ workspace 由宿主机挂载进来,同一文件两边路径不同;用户消息�
     Write-Ok "已写入宿主机↔VM 路径映射到 VM ~/.claude/CLAUDE.md($($Mappings.Count) 条)"
 }
 
-# ====== ExtraMounts:来源(读 mounts.txt) ======
+# ====== mounts.txt:读取 ======
 # 返回 string[];配置文件不存在/为空 → 返回空数组(调用方跳过)
-function Get-ExtraMountsSource {
+function Get-MountEntries {
     $cfg = Join-Path $StateDir "mounts.txt"
     if (-not (Test-Path $cfg)) { return @() }
     if (-not (Test-Path $cfg -PathType Leaf)) { throw "mounts.txt 不是普通文件: $cfg" }
@@ -743,11 +757,11 @@ function Get-ExtraMountsSource {
     return @($lines)
 }
 
-# ====== ExtraMounts:解析 + 校验 ======
+# ====== mounts.txt:解析 + 校验 ======
 # 输入:[string[]] 每项 "HostPath" 或 "HostPath=vmSubdir"
 # 输出:hashtable 数组,每项 @{ HostPath=<绝对路径>; VmSubdir=<相对路径>; Target=<VM 内绝对路径> }
 # 解析/校验失败直接 throw(参数错误 fail fast)
-function Resolve-ExtraMounts {
+function Resolve-MountEntries {
     param([Parameter(Mandatory)] [string[]]$Items)
 
     $result = @()
@@ -810,9 +824,9 @@ function Resolve-ExtraMounts {
     return $result
 }
 
-# ====== ExtraMounts:实际挂载 ======
+# ====== mounts.txt:实际挂载 ======
 # 前提:~/workspace 是 VM 本地目录(不挂宿主根),子目录挂载才不会嵌套
-function Mount-ExtraMounts {
+function Mount-WorkspaceSubdirs {
     param([Parameter(Mandatory)] [array]$Mounts)
 
     if ($Mounts.Count -eq 0) { return $true }
@@ -964,17 +978,155 @@ function Confirm-RebuildForFeatures {
     }
 }
 
+# ====== start:阶段子函数(bundle / 挂载 / 隧道) ======
+# 由 Start-ClaudeDev 按序调用;读 launch.ps1 顶层变量($vmName/$StateDir 等,动态作用域,
+# 同 feature-menu.ps1 读 $optionalFeatures 的模式),失败直接 throw,与主流程同语义
+
+# bundle 传输 + 离线安装(基础 cloud-init 完成后调用)
+function Invoke-BundlePhase {
+    # 基础 cloud-init 完成后再传 bundle:bundle 是 ~220MB 只读 tarball,不需要"实时挂载"。
+    # multipass mount 走 multipass-sshfs,新 VM 上 daemon 首次推 sshfs 二进制经常超 180s
+    # (实测 2026-08-12:cloud-init done、daemon 健康、mount 180s 仍未完成)。
+    # 改用 transfer -r 直接 SFTP 拷贝,绕开 sshfs 推送瓶颈。
+    Write-Step "传输离线 bundle 到 VM..."
+    $bundleHost = Join-Path $StateDir 'bundle'
+    # 关键文件存在 = 已传过,跳过(幂等)。glob 来自 $bundleKeyGlobs(与 Test-BundleReady 同源;VM 内是 .bundle 带点前缀)
+    $bundleKeyFiles = ($bundleKeyGlobs | ForEach-Object { 'test -f /home/ubuntu/' + ($_ -replace '^bundle/', '.bundle/') }) -join ' && '
+    $bundleCheck = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'bash', '-lc', $bundleKeyFiles) -TimeoutSec 30
+    if ($bundleCheck.TimedOut) { throw "bundle 关键文件检查超时,停止启动" }
+    if ($bundleCheck.ExitCode -ne 0) {
+        # transfer -r 在 dst 已存在时会拷成 dst/<src-name>/,先 rm -rf 保证干净
+        $null = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'sudo', 'rm', '-rf', '/home/ubuntu/.bundle') -TimeoutSec 30
+        # 600s:~220MB SFTP,慢网络给足余量
+        $bundleTransfer = Invoke-Multipass -ArgumentList @('transfer', '-r', $bundleHost, "${vmName}:/home/ubuntu/.bundle") -TimeoutSec 600
+        if ($bundleTransfer.TimedOut -or $bundleTransfer.ExitCode -ne 0) {
+            $err = if ($bundleTransfer.Stderr) { $bundleTransfer.Stderr.Trim() } else { '(无 stderr)' }
+            throw "bundle 传输失败，停止启动。$err"
+        }
+        # 传输后再校验关键文件齐全
+        $recheck = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'bash', '-lc', $bundleKeyFiles) -TimeoutSec 30
+        if ($recheck.ExitCode -ne 0 -or $recheck.TimedOut) { throw "bundle 传输后关键文件不完整，停止启动" }
+    }
+    Write-Ok "bundle 已传输且关键文件齐全"
+
+    # bundle 传输后:先探测是否已装好(已装好跳过重装,省 ~1 分钟),否则执行本地安装
+    # 用 type -P(PATH-only)而非 command -v:profile 定义了 claude() 函数,登录 shell 下 command -v 会被函数遮蔽误报成功
+    Write-Step "检查 Node.js / Claude Code / cc-pocket 是否已在 VM 内..."
+    $probe = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'bash', '-lc', 'type -P node >/dev/null && type -P claude >/dev/null && type -P cc-pocket-daemon >/dev/null') -TimeoutSec 30
+    if ($probe.ExitCode -eq 0 -and -not $probe.TimedOut) {
+        Write-Ok "Node.js、Claude Code、cc-pocket 已在 VM 内,跳过离线重装"
+    } else {
+        # 以 root 运行(sudo):tar 解到 /usr/local、npm -g 全局安装都需要 root。
+        # 安装脚本单独存为 LF 文件,避免默认 fish 解析多行 bash -lc 参数时破坏引号/换行。
+        Write-Step "从 bundle 安装 Node.js、Claude Code 和 cc-pocket..."
+        $installScriptHost = Join-Path $assetsDir 'install-bundle.sh'
+        if (-not (Test-Path $installScriptHost)) { throw "缺少 bundle 安装脚本:$installScriptHost" }
+        $transfer = Invoke-Multipass -ArgumentList @('transfer', $installScriptHost, "${vmName}:/tmp/install-bundle.sh") -TimeoutSec 30
+        if ($transfer.TimedOut -or $transfer.ExitCode -ne 0) { throw "bundle 安装脚本传入 VM 失败。$($transfer.Stderr)" }
+        $install = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'sudo', 'bash', '/tmp/install-bundle.sh') -TimeoutSec 600
+        if ($install.TimedOut -or $install.ExitCode -ne 0) { throw "bundle 本地安装失败，停止启动。$($install.Stderr)" }
+        Write-Ok "Node.js、Claude Code、cc-pocket 本地安装完成"
+    }
+    $bundleProgress = Show-CloudInitProgress -VmName $vmName
+    Complete-BundleProgress -Progress $bundleProgress
+}
+
+# 挂载:.claude-host(硬 RO)+ VM 本地 workspace + mounts.txt 子目录 + path-map 写入
+function Invoke-MountPhase {
+    param(
+        [Parameter(Mandatory)] [array]$Mounts,
+        [Parameter(Mandatory)] [AllowEmptyCollection()] [string[]]$EnabledFeatures
+    )
+    Write-Step "挂载宿主机 ~/.claude → VM $mountClaudeHost..."
+    $hostClaude = Join-Path $env:USERPROFILE ".claude"
+    if (-not (Test-Path $hostClaude)) { throw "$hostClaude 不存在,Claude Code 没装?" }
+    $null = Try-Mount -MountArgs @('mount', $hostClaude, "${vmName}:${mountClaudeHost}") `
+                      -Description "挂载 .claude" `
+                      -FailureHint "(cc-switch env 同步会失效,继续)" `
+                      -VmTarget $mountClaudeHost
+    # 内核层硬 RO:防 VM 里 Claude Code 误写污染宿主机 ~/.claude
+    # 失败只 warning(RW 仍可用),不阻塞后续流程
+    $null = Set-HostMountReadOnly -Target $mountClaudeHost
+
+    # workspace 挂载(唯一模式):~/workspace 保持 VM 本地目录,只挂 mounts.txt 声明的子目录。
+    # 不做根 workspace 宿主挂载 —— 往已挂载目录内部再挂(嵌套挂载)在 Windows Multipass 上不稳
+    Write-Step "准备 VM 本地 $mountWorkspace(卸掉遗留的根挂载)..."
+    # 90s:慢网络 + cloud-init 在跑时 umount 也可能慢;30s 实测不够,会连锁 throw
+    $unmountRoot = Invoke-Multipass -ArgumentList @('umount', "${vmName}:${mountWorkspace}") -TimeoutSec 90
+    if ($unmountRoot.TimedOut) {
+        throw "根 workspace 卸载超时,停止启动以避免嵌套挂载"
+    }
+    $mkRoot = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'mkdir', '-p', $mountWorkspace) -TimeoutSec 30
+    if ($mkRoot.ExitCode -ne 0 -or $mkRoot.TimedOut) {
+        throw "无法创建 VM 本地 workspace 根目录,停止启动"
+    }
+    if (Test-VMTargetMounted -Target $mountWorkspace) {
+        throw "根 workspace 仍是宿主机挂载,停止启动以避免嵌套挂载。请检查 Multipass 挂载状态后重试"
+    }
+    Write-Ok "$mountWorkspace 保持 VM 本地(为 mounts.txt 子目录挂载做准备)"
+
+    # mounts.txt 挂载:挂到 VM 本地 workspace 子目录
+    if (-not (Mount-WorkspaceSubdirs -Mounts $Mounts)) {
+        throw "一个或多个额外挂载失败,停止启动以避免 workspace 数据位置不确定"
+    }
+
+    # 可选特性 path-map(非重建型,现有 VM 立即生效):挂载已定,按实际映射生成说明块
+    if ($EnabledFeatures -contains 'path-map') {
+        # 映射恒非空:开头已 fail-fast 保证 mounts.txt 至少一项
+        $pathMappings = foreach ($m in $Mounts) { @{ HostPrefix = $m.HostPath; VmPath = $m.Target } }
+        Set-VMClaudeMemory -Mappings @($pathMappings)
+    } else {
+        # 取消勾选时移除旧块,VM 内状态与勾选保持一致(幂等,无块时无操作)
+        Set-VMClaudeMemory -Remove
+    }
+}
+
+# SSH 反向隧道(仅当宿主机 ANTHROPIC_BASE_URL 指向本地代理时;公网直连则跳过)
+function Start-TunnelIfNeeded {
+    $tunnel = Get-TunnelDecision -ConfiguredPort $CcSwitchPort -ExplicitPort:$ccSwitchPortExplicit
+    if ($tunnel.Mode -eq 'direct') {
+        Write-Step "跳过 SSH 反向隧道:$($tunnel.Reason)"
+    } else {
+        $tunnelPort = $tunnel.Port
+        Write-Step "启动 SSH 反向隧道(宿主机 $tunnelPort ↔ VM 127.0.0.1:$tunnelPort)..."
+        $vmIp = Get-VmIp
+        if (-not $vmIp) { throw "无法获取 VM IP,multipass info 看看" }
+
+        $knownHosts = Join-Path $env:TEMP "claude-dev-known-hosts"
+        $tunnelArgs = @(
+            "-nNT",
+            "-R", "${tunnelPort}:127.0.0.1:${tunnelPort}",
+            "-i", $keyPath,
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "UserKnownHostsFile=$knownHosts",
+            "-o", "ServerAliveInterval=30",
+            "-o", "ExitOnForwardFailure=yes",
+            "ubuntu@$vmIp"
+        )
+        # PS 5.1 的 Start-Process 对 ArgumentList 只按空格拼接、不加引号:
+        # $keyPath/$knownHosts 含空格时(用户名带空格的 TEMP、含空格的项目路径)参数会被撕断,手工加引号
+        $tunnelArgsQuoted = Join-ProcessArguments -Arguments $tunnelArgs
+        $proc = Start-Process -FilePath ssh -ArgumentList $tunnelArgsQuoted -PassThru -WindowStyle Hidden
+        Start-Sleep -Milliseconds 800
+        if ($proc.HasExited) {
+            throw "SSH 隧道秒退,ExitCode=$($proc.ExitCode)。可能是 VM sshd 没起或 key 没注入"
+        }
+        $proc.Id | Out-File $pidFile -Encoding ascii -Force
+        Write-Ok "隧道 PID $($proc.Id)"
+    }
+}
+
 # ====== start ======
 function Start-ClaudeDev {
     Assert-Prerequisites
 
     # mounts.txt 解析 + 校验(在动 VM 前先 fail fast,避免无效配置触发 daemon 重启等副作用)
     # start 只有唯一的挂载模式:~/workspace 保持 VM 本地目录,mounts.txt 每项挂成一个子目录
-    $extraItems = Get-ExtraMountsSource
-    $resolvedExtraMounts = if ($extraItems.Count -gt 0) { Resolve-ExtraMounts -Items $extraItems } else { @() }
+    $mountEntries = Get-MountEntries
+    $mounts = if ($mountEntries.Count -gt 0) { Resolve-MountEntries -Items $mountEntries } else { @() }
     # mounts.txt 缺失/为空属配置不完整:VM workspace 会是本地空目录,
     # path-map 也无映射可写(勾选了却不生效),启动前拦下
-    if ($resolvedExtraMounts.Count -eq 0) {
+    if ($mounts.Count -eq 0) {
         throw "start 需要 mounts.txt 配置挂载:$StateDir\mounts.txt 不存在或为空。把 $StateDir\mounts.example.txt 复制为 mounts.txt,填入宿主目录(每行一个)后重跑"
     }
 
@@ -1071,128 +1223,10 @@ function Start-ClaudeDev {
         Write-Warn "cloud-init 结束状态: error(常见是 APT 镜像不可达、基础包装失败)。若后续 bundle 安装报错,先查 'multipass exec $vmName -- cloud-init status --long' 和 /var/log/cloud-init-output.log"
     }
 
-    # 基础 cloud-init 完成后再传 bundle:bundle 是 ~220MB 只读 tarball,不需要"实时挂载"。
-    # multipass mount 走 multipass-sshfs,新 VM 上 daemon 首次推 sshfs 二进制经常超 180s
-    # (实测 2026-08-12:cloud-init done、daemon 健康、mount 180s 仍未完成)。
-    # 改用 transfer -r 直接 SFTP 拷贝,绕开 sshfs 推送瓶颈。
-    Write-Step "传输离线 bundle 到 VM..."
-    $bundleHost = Join-Path $StateDir 'bundle'
-    # 关键文件存在 = 已传过,跳过(幂等)。4 个必需文件全查;wrapper 用 [0-9] 排除 linux-x64 变体(同 install-bundle.sh 的 glob)
-    $bundleKeyFiles = 'test -f /home/ubuntu/.bundle/node-v*-linux-x64.tar.xz && test -f /home/ubuntu/.bundle/anthropic-ai-claude-code-[0-9]*.tgz && test -f /home/ubuntu/.bundle/anthropic-ai-claude-code-linux-x64-*.tgz && test -f /home/ubuntu/.bundle/cc-pocket/cc-pocket-daemon-*-linux-x86_64.tar.gz'
-    $bundleCheck = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'bash', '-lc', $bundleKeyFiles) -TimeoutSec 30
-    if ($bundleCheck.TimedOut) { throw "bundle 关键文件检查超时,停止启动" }
-    if ($bundleCheck.ExitCode -ne 0) {
-        # transfer -r 在 dst 已存在时会拷成 dst/<src-name>/,先 rm -rf 保证干净
-        $null = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'sudo', 'rm', '-rf', '/home/ubuntu/.bundle') -TimeoutSec 30
-        # 600s:~220MB SFTP,慢网络给足余量
-        $bundleTransfer = Invoke-Multipass -ArgumentList @('transfer', '-r', $bundleHost, "${vmName}:/home/ubuntu/.bundle") -TimeoutSec 600
-        if ($bundleTransfer.TimedOut -or $bundleTransfer.ExitCode -ne 0) {
-            $err = if ($bundleTransfer.Stderr) { $bundleTransfer.Stderr.Trim() } else { '(无 stderr)' }
-            throw "bundle 传输失败，停止启动。$err"
-        }
-        # 传输后再校验关键文件齐全
-        $recheck = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'bash', '-lc', $bundleKeyFiles) -TimeoutSec 30
-        if ($recheck.ExitCode -ne 0 -or $recheck.TimedOut) { throw "bundle 传输后关键文件不完整，停止启动" }
-    }
-    Write-Ok "bundle 已传输且关键文件齐全"
-
-    # bundle 传输后:先探测是否已装好(已装好跳过重装,省 ~1 分钟),否则执行本地安装
-    # 用 type -P(PATH-only)而非 command -v:profile 定义了 claude() 函数,登录 shell 下 command -v 会被函数遮蔽误报成功
-    Write-Step "检查 Node.js / Claude Code / cc-pocket 是否已在 VM 内..."
-    $probe = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'bash', '-lc', 'type -P node >/dev/null && type -P claude >/dev/null && type -P cc-pocket-daemon >/dev/null') -TimeoutSec 30
-    if ($probe.ExitCode -eq 0 -and -not $probe.TimedOut) {
-        Write-Ok "Node.js、Claude Code、cc-pocket 已在 VM 内,跳过离线重装"
-    } else {
-        # 以 root 运行(sudo):tar 解到 /usr/local、npm -g 全局安装都需要 root。
-        # 安装脚本单独存为 LF 文件,避免默认 fish 解析多行 bash -lc 参数时破坏引号/换行。
-        Write-Step "从 bundle 安装 Node.js、Claude Code 和 cc-pocket..."
-        $installScriptHost = Join-Path $assetsDir 'install-bundle.sh'
-        if (-not (Test-Path $installScriptHost)) { throw "缺少 bundle 安装脚本:$installScriptHost" }
-        $transfer = Invoke-Multipass -ArgumentList @('transfer', $installScriptHost, "${vmName}:/tmp/install-bundle.sh") -TimeoutSec 30
-        if ($transfer.TimedOut -or $transfer.ExitCode -ne 0) { throw "bundle 安装脚本传入 VM 失败。$($transfer.Stderr)" }
-        $install = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'sudo', 'bash', '/tmp/install-bundle.sh') -TimeoutSec 600
-        if ($install.TimedOut -or $install.ExitCode -ne 0) { throw "bundle 本地安装失败，停止启动。$($install.Stderr)" }
-        Write-Ok "Node.js、Claude Code、cc-pocket 本地安装完成"
-    }
-    $bundleProgress = Show-CloudInitProgress -VmName $vmName
-    Complete-BundleProgress -Progress $bundleProgress
-    Write-Step "挂载宿主机 ~/.claude → VM $mountClaudeHost..."
-    $hostClaude = Join-Path $env:USERPROFILE ".claude"
-    if (-not (Test-Path $hostClaude)) { throw "$hostClaude 不存在,Claude Code 没装?" }
-    $null = Try-Mount -MountArgs @('mount', $hostClaude, "${vmName}:${mountClaudeHost}") `
-                      -Description "挂载 .claude" `
-                      -FailureHint "(cc-switch env 同步会失效,继续)" `
-                      -VmTarget $mountClaudeHost
-    # 内核层硬 RO:防 VM 里 Claude Code 误写污染宿主机 ~/.claude
-    # 失败只 warning(RW 仍可用),不阻塞后续流程
-    $null = Set-HostMountReadOnly -Target $mountClaudeHost
-
-    # workspace 挂载(唯一模式):~/workspace 保持 VM 本地目录,只挂 mounts.txt 声明的子目录。
-    # 不做根 workspace 宿主挂载 —— 往已挂载目录内部再挂(嵌套挂载)在 Windows Multipass 上不稳
-    Write-Step "准备 VM 本地 $mountWorkspace(卸掉遗留的根挂载)..."
-    # 90s:慢网络 + cloud-init 在跑时 umount 也可能慢;30s 实测不够,会连锁 throw
-    $unmountRoot = Invoke-Multipass -ArgumentList @('umount', "${vmName}:${mountWorkspace}") -TimeoutSec 90
-    if ($unmountRoot.TimedOut) {
-        throw "根 workspace 卸载超时,停止启动以避免嵌套挂载"
-    }
-    $mkRoot = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'mkdir', '-p', $mountWorkspace) -TimeoutSec 30
-    if ($mkRoot.ExitCode -ne 0 -or $mkRoot.TimedOut) {
-        throw "无法创建 VM 本地 workspace 根目录,停止启动"
-    }
-    if (Test-VMTargetMounted -Target $mountWorkspace) {
-        throw "根 workspace 仍是宿主机挂载,停止启动以避免嵌套挂载。请检查 Multipass 挂载状态后重试"
-    }
-    Write-Ok "$mountWorkspace 保持 VM 本地(为 mounts.txt 子目录挂载做准备)"
-
-    # mounts.txt 挂载:挂到 VM 本地 workspace 子目录
-    if (-not (Mount-ExtraMounts -Mounts $resolvedExtraMounts)) {
-        throw "一个或多个额外挂载失败,停止启动以避免 workspace 数据位置不确定"
-    }
-
-    # 可选特性 path-map(非重建型,现有 VM 立即生效):挂载已定,按实际映射生成说明块
-    if ($enabledFeatures -contains 'path-map') {
-        # 映射恒非空:开头已 fail-fast 保证 mounts.txt 至少一项
-        $pathMappings = foreach ($m in $resolvedExtraMounts) { @{ HostPrefix = $m.HostPath; VmPath = $m.Target } }
-        Set-VMClaudeMemory -Mappings @($pathMappings)
-    } else {
-        # 取消勾选时移除旧块,VM 内状态与勾选保持一致(幂等,无块时无操作)
-        Set-VMClaudeMemory -Remove
-    }
-
-    # SSH 反向隧道(仅当宿主机 ANTHROPIC_BASE_URL 指向本地代理时;公网直连则跳过)
-    $tunnel = Get-TunnelDecision -ConfiguredPort $CcSwitchPort -ExplicitPort:$ccSwitchPortExplicit
-    if ($tunnel.Mode -eq 'direct') {
-        Write-Step "跳过 SSH 反向隧道:$($tunnel.Reason)"
-    } else {
-        $tunnelPort = $tunnel.Port
-        Write-Step "启动 SSH 反向隧道(宿主机 $tunnelPort ↔ VM 127.0.0.1:$tunnelPort)..."
-        $vmIp = Get-VmIp
-        if (-not $vmIp) { throw "无法获取 VM IP,multipass info 看看" }
-
-        $knownHosts = Join-Path $env:TEMP "claude-dev-known-hosts"
-        $tunnelArgs = @(
-            "-nNT",
-            "-R", "${tunnelPort}:127.0.0.1:${tunnelPort}",
-            "-i", $keyPath,
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=$knownHosts",
-            "-o", "ServerAliveInterval=30",
-            "-o", "ExitOnForwardFailure=yes",
-            "ubuntu@$vmIp"
-        )
-        # PS 5.1 的 Start-Process 对 ArgumentList 只按空格拼接、不加引号:
-        # $keyPath/$knownHosts 含空格时(用户名带空格的 TEMP、含空格的项目路径)参数会被撕断,手工加引号
-        $tunnelArgsQuoted = ($tunnelArgs | ForEach-Object {
-            if ($_ -match '[\s"]') { '"' + ($_ -replace '"','\"') + '"' } else { $_ }
-        }) -join ' '
-        $proc = Start-Process -FilePath ssh -ArgumentList $tunnelArgsQuoted -PassThru -WindowStyle Hidden
-        Start-Sleep -Milliseconds 800
-        if ($proc.HasExited) {
-            throw "SSH 隧道秒退,ExitCode=$($proc.ExitCode)。可能是 VM sshd 没起或 key 没注入"
-        }
-        $proc.Id | Out-File $pidFile -Encoding ascii -Force
-        Write-Ok "隧道 PID $($proc.Id)"
-    }
+    # 三阶段:bundle 传输安装 → 挂载 → 隧道(子函数见上,失败各自 throw)
+    Invoke-BundlePhase
+    Invoke-MountPhase -Mounts $mounts -EnabledFeatures $enabledFeatures
+    Start-TunnelIfNeeded
 
     Write-Host ""
     Complete-StartupProgress -EnabledFeatures $enabledFeatures
@@ -1265,7 +1299,8 @@ function Show-Status {
     if ((Get-VmState) -eq "Running") {
         if ($tunnel.Mode -eq 'direct') {
             # 直连模式:从 VM 探测公网 base_url 可达性
-            $code = & multipass exec $vmName -- bash -c "curl -sS -o /dev/null -w '%{http_code}' --max-time 5 '$($tunnel.BaseUrl)/' 2>/dev/null || echo 000"
+            $r = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'bash', '-c', "curl -sS -o /dev/null -w '%{http_code}' --max-time 5 '$($tunnel.BaseUrl)/' 2>/dev/null || echo 000") -TimeoutSec 15
+            $code = if ($r.TimedOut -or -not $r.Stdout) { '000' } else { $r.Stdout.Trim() }
             if ($code -match '^000') {
                 Write-Warn "VM 里 curl base_url = $code (公网不可达?)"
             } else {
@@ -1274,7 +1309,8 @@ function Show-Status {
         } else {
             # curl -w 连不上时也会打 000 且退出非零,`|| echo 000` 会再补一个 → 输出可能是 000000,
             # 用前缀匹配判失败,避免把探测失败误报成"隧道通了"
-            $code = & multipass exec $vmName -- bash -c "curl -sS -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:$($tunnel.Port)/ 2>/dev/null || echo 000"
+            $r = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'bash', '-c', "curl -sS -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:$($tunnel.Port)/ 2>/dev/null || echo 000") -TimeoutSec 15
+            $code = if ($r.TimedOut -or -not $r.Stdout) { '000' } else { $r.Stdout.Trim() }
             if ($code -match '^000') {
                 Write-Warn "VM 里 curl 127.0.0.1:$($tunnel.Port) = $code (隧道可能没通)"
             } else {

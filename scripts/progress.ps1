@@ -23,21 +23,19 @@ function Render-ProgressSnapshot {
     Initialize-ProgressState
 
     Show-ProgressStage -Number 1 -Title '基础包安装'
-    $packageNames = @('git','curl','wget','vim','less','jq','ripgrep','fd-find','tmux','fish','fzf','zoxide','openssh-server','sudo','locales','ca-certificates')
-    foreach ($installed in @($Progress['packages'])) {
-        $index = [array]::IndexOf($packageNames, [string]$installed)
-        if ($index -ge 0) {
-            $number = $index + 1
-            $key = "package:$number"
-            if (-not $script:progressState[$key]) {
-                $script:progressState[$key] = $true
-                Write-Host ("    [{0}/16] {1} 安装完成" -f $number, $installed) -ForegroundColor DarkGray
-            }
+    # 包清单读 launch.ps1 的 $basePackages(动态作用域,同 $optionalFeatures 模式)——
+    # 与渲染进 cloud-init 的安装清单同源,增减基础包只改 launch.ps1 一处
+    $packages = @($Progress['packages'])
+    for ($i = 0; $i -lt $packages.Count; $i++) {
+        $key = "package:$($packages[$i])"
+        if (-not $script:progressState[$key]) {
+            $script:progressState[$key] = $true
+            Write-Host ("    [{0}/{1}] {2} 安装完成" -f ($i + 1), $basePackages.Count, $packages[$i]) -ForegroundColor DarkGray
         }
     }
-    if (@($Progress['packages']).Count -eq 16 -and -not $script:progressState['package:complete']) {
+    if ($Progress['package_name'] -eq 'done' -and -not $script:progressState['package:complete']) {
         $script:progressState['package:complete'] = $true
-        Write-Host '    OK  基础包安装完成（16 个）' -ForegroundColor Green
+        Write-Host ("    OK  基础包安装完成（{0} 个）" -f $basePackages.Count) -ForegroundColor Green
     }
 }
 
@@ -46,13 +44,14 @@ function Complete-CloudInitProgress {
     if (-not $Progress) { return }
     Render-ProgressSnapshot -Progress $Progress
     Show-ProgressStage -Number 2 -Title '配置 VM 交互环境'
+    # events 全量显示(cloud-init printf 的都是给人看的中文消息),去重;stage:N| 是
+    # 内部阶段标记(Complete-BundleProgress 用),不显示
     foreach ($event in @($Progress['events'])) {
-        if ($event -match '^(Fish 配置完成|tmux 配置完成|SSH 配置完成|Claude 配置同步逻辑完成)$') {
-            $key = "event:$event"
-            if (-not $script:progressState[$key]) {
-                $script:progressState[$key] = $true
-                Write-Host ("    {0}" -f $event) -ForegroundColor DarkGray
-            }
+        if ($event -match '^stage:') { continue }
+        $key = "event:$event"
+        if (-not $script:progressState[$key]) {
+            $script:progressState[$key] = $true
+            Write-Host ("    {0}" -f $event) -ForegroundColor DarkGray
         }
     }
 }

@@ -58,7 +58,7 @@ function vm { & "$env:USERPROFILE\.claude\skills\cc-sandbox\scripts\launch.ps1" 
 │  └─ progress.ps1
 │                               └─ .tunnel.pid     隧道进程号
 ├─ assets/                     (状态目录固定 %USERPROFILE%\.cc-sandbox,不可更换)
-│  ├─ cloud-init.yaml          旧布局(状态放仓库根)首次运行自动迁移到状态目录,原文件保留
+│  ├─ cloud-init.yaml          (cloud-init 模板,launch.ps1 渲染)
 │  ├─ install-bundle.sh
 │  ├─ statusline.sh
 │  ├─ tmux.conf
