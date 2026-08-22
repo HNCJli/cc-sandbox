@@ -43,7 +43,7 @@ ssh -V                      # OpenSSH 客户端
 .\scripts\launch.ps1 start
 ```
 
-**多目录挂载**(挂多个宿主目录到 `~/workspace/<子目录>`):先把 `assets\mounts.example.txt` 复制为状态目录下 `mounts.txt` 填好路径,或直接传 `-ExtraMounts`。
+**多目录挂载**(挂多个宿主目录到 `~/workspace/<子目录>`):状态目录常备 `mounts.example.txt` 模板(脚本运行时自动放置),复制为 `mounts.txt` 填好路径,或直接传 `-ExtraMounts`。两者至少其一,否则 `start` 直接报错(零挂载的 `-NoRootWorkspace` 属配置不完整)。
 
 ```powershell
 .\scripts\launch.ps1 start -NoRootWorkspace                     # 读状态目录的 mounts.txt
@@ -52,7 +52,7 @@ ssh -V                      # OpenSSH 客户端
 
 多目录模式必须 `-NoRootWorkspace`(Windows 上 Multipass 对嵌套挂载支持不稳);`-WorkspaceHost` 只在传统模式(单根)下用。
 
-**可选特性(交互选择,不用记参数)**:可选特性(如 Tailscale)**没有命令行开关**。真人 PowerShell 终端裸跑 `start` 会弹**方向键多选菜单**:↑↓ 移动高亮、空格 勾选/取消、回车 确认(数字键可直接切换某项,`a` 全选、`n` 全不选),选择持久化到状态目录 `features.txt`。直接回车 = 保持上次选择;不支持按键的终端(窗口过小/非 console 宿主)自动降级为编号输入;stdin 被重定向时(后台/管道/Claude 代跑)自动跳过菜单、静默沿用 `features.txt`(要改选择就编辑该文件)。新启用的"重建型"特性在 VM 已存在时会被探测到,交互询问是否立即 delete + 重建:答 `y` 一条命令完成(状态目录数据保留);答 `N`/回车跳过,VM 不动,下次 `delete + start` 才生效(收尾提示会注明包尚未装进 VM)。特性清单见 [references/optional-features.md](references/optional-features.md)。
+**可选特性(交互选择,不用记参数)**:可选特性(Tailscale、路径映射记忆等)**没有命令行开关**。真人 PowerShell 终端裸跑 `start` 会弹**方向键多选菜单**:↑↓ 移动高亮、空格 勾选/取消、回车 确认(数字键可直接切换某项,`a` 全选、`n` 全不选),选择持久化到状态目录 `features.txt`。直接回车 = 保持上次选择;不支持按键的终端(窗口过小/非 console 宿主)自动降级为编号输入;stdin 被重定向时(后台/管道/Claude 代跑)自动跳过菜单、静默沿用 `features.txt`(要改选择就编辑该文件)。新启用的"重建型"特性在 VM 已存在时会被探测到,交互询问是否立即 delete + 重建:答 `y` 一条命令完成(状态目录数据保留);答 `N`/回车跳过,VM 不动,下次 `delete + start` 才生效(收尾提示会注明包尚未装进 VM);非重建型特性(如路径映射记忆)不需重建,现有 VM 下次 `start` 即生效。特性清单见 [references/optional-features.md](references/optional-features.md)。
 
 **`start` 全部参数**(权威来源:`scripts\launch.ps1` 顶部 `param()` 块):
 
@@ -65,7 +65,7 @@ ssh -V                      # OpenSSH 客户端
 | `-AptMirror <域名>` | `mirrors.aliyun.com` | VM 内 APT 镜像,渲染进 cloud-init,仅重建生效 |
 
 | `-ExtraMounts <列表>` | 空 | `"路径"` / `"路径=子目录"`;须配 `-NoRootWorkspace`;优先于 mounts.txt |
-| `-NoRootWorkspace` | 关 | 多目录模式:跳过根 workspace 挂载 |
+| `-NoRootWorkspace` | 关 | 多目录模式:跳过根 workspace 挂载;必须有 mounts.txt 或 `-ExtraMounts`(至少一个挂载),否则报错 |
 
 首次 3–15 分钟(下载 Ubuntu 镜像 + cloud-init 装基础包;Node/Claude 从 bundle 离线装)。脚本会自动:开 privileged-mounts → 创建/唤醒 VM → 挂 `~/.claude`(RO)和 workspace → 起隧道(如需要)。
 
@@ -109,6 +109,8 @@ claude --dangerously-skip-permissions
 进 VM 是 fish 提示符:灰色历史建议(`→` 或 `Ctrl+F` 接受)、`Ctrl+R` 模糊搜历史、`z <关键词>` 跳目录(zoxide)。临时要 bash 敲 `bash`。
 
 每次敲 `claude` 前(fish 和 bash 都一样)profile 脚本会自动重新同步 env,宿主机 cc-switch 切 provider 后 VM 会跟上。
+
+**贴宿主机路径**:勾选了"路径映射记忆"特性时,VM 里 Claude Code 的全局记忆(`~/.claude/CLAUDE.md`)带宿主机↔VM 路径映射表,对话里直接贴 Windows 路径(如 `D:\...\share-dir-01\test-project\.gitignore`),它会自动换算成挂载点路径(`/home/ubuntu/workspace/share-dir-01/test-project/.gitignore`)再操作。
 
 ### cc-pocket(可选,手机遥控)
 

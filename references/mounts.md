@@ -8,7 +8,7 @@
 
 每项格式 `HostPath` 或 `HostPath=vmSubdir`;简写时子目录名取宿主目录最后一级。VM 内挂成 `~/workspace/<子目录>`。
 
-也可在状态目录(默认 `%USERPROFILE%\.cc-sandbox\`)建 `mounts.txt`(基于 `assets\mounts.example.txt` 复制,每行一项,`#` 起始为注释),`-ExtraMounts` 未传时自动读它:
+也可在状态目录(默认 `%USERPROFILE%\.cc-sandbox\`)建 `mounts.txt`:状态目录常备 `mounts.example.txt` 模板(launch.ps1 运行时自动放置),复制为 `mounts.txt` 填入自己的路径(每行一项,`#` 起始为注释),`-ExtraMounts` 未传时自动读它:
 
 ```text
 D:\code\repo1

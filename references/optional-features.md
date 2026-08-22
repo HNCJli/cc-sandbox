@@ -1,4 +1,18 @@
-# 可选功能:VM 内 Docker / 跨网络访问(Tailscale)
+# 可选功能:VM 内 Docker / 跨网络访问(Tailscale) / 宿主机路径换算
+
+## 宿主机路径自动换算(路径映射记忆)
+
+勾选后,`start` 会在挂载完成后往 **VM 内** Claude Code 的全局记忆(`~/.claude/CLAUDE.md`)写入"沙箱说明 + 宿主机↔VM 路径映射表"(只含 workspace 挂载,按本次实际挂载生成:单根模式一条 workspace 映射,多目录模式每条挂载一项)。之后在 VM 里的 Claude Code 对话中**直接贴宿主机 Windows 路径**即可,如:
+
+```
+看下 D:\multipass-share-dir-worksapce\share-dir-01\test-project\.gitignore
+```
+
+VM 里的 Claude Code 按表换算成 `/home/ubuntu/workspace/share-dir-01/test-project/.gitignore` 再读写,也会在展示文件位置时反向换算回 Windows 路径。
+
+- 勾选方式同 Tailscale:交互菜单空格勾选,或直接编辑 `features.txt` 加一行 `path-map`
+- **非重建型**:勾上后现有 VM 下次 `start` 即写入,不需要 delete + start;每次 start 按当前挂载刷新
+- 取消勾选后,下次 `start` 会把 VM 里这段映射块移除(`CLAUDE.md` 中标记 `<!-- cc-sandbox:begin/end -->` 之间的内容,块外自己写的内容不动)
 
 ## VM 内装 Docker
 

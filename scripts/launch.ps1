@@ -81,6 +81,13 @@ foreach ($name in @('bundle', 'workspace', 'mounts.txt', '.ssh-key', '.ssh-key.p
     }
 }
 
+# 状态目录常备 mounts.txt 模板(用户复制/改名为 mounts.txt 后填自己的路径;幂等,已存在不覆盖)
+$mountsExampleSrc = Join-Path $assetsDir 'mounts.example.txt'
+$mountsExampleDst = Join-Path $StateDir 'mounts.example.txt'
+if ((Test-Path $mountsExampleSrc) -and -not (Test-Path $mountsExampleDst)) {
+    Copy-Item $mountsExampleSrc $mountsExampleDst
+}
+
 # -CcSwitchPort 是否被用户显式传入(未显式传时,允许从 base_url 里自动采信端口)
 $ccSwitchPortExplicit = $PSBoundParameters.ContainsKey('CcSwitchPort')
 
@@ -92,10 +99,12 @@ $mountWorkspace = "/home/ubuntu/workspace"              # ./workspace 挂到 VM 
 
 # ====== 可选特性目录 ======
 # 交互菜单 / features.txt 持久化 / 收尾提示 / 重建确认全部由此驱动;
-# 新增可选特性 = 在此加一项,再在 Render-CloudInit 里接对应注入块(参考 {{TAILSCALE_BLOCK}} 的接法)
+# 新增可选特性 = 在此加一项;重建型的再在 Render-CloudInit 里接注入块(参考 {{TAILSCALE_BLOCK}} 的接法),
+# 非重建型的在 Start-ClaudeDev 里按 Id 接执行段(参考 path-map 的接法)
 #   Id          features.txt 里持久化的标识(改名等于换特性,别动)
-#   RebuildOnly 仅重建 VM 时生效(cloud-init 只在 multipass launch 时跑)
-#   Probe       VM 内探测该特性是否已生效的 bash 片段(约定 exit 0=已生效、1=未生效、其他=无法判定)
+#   RebuildOnly 仅重建 VM 时生效(cloud-init 只在 multipass launch 时跑);false = 每次 start 直接执行
+#   Probe       VM 内探测该特性是否已生效的 bash 片段(约定 exit 0=已生效、1=未生效、其他=无法判定;
+#               仅 RebuildOnly 特性会被重建确认用到)
 #   FinishHint  start 收尾打印的一行提示(如配对指引),不需要则留空
 $optionalFeatures = @(
     @{
@@ -105,6 +114,14 @@ $optionalFeatures = @(
         Description = '跨网络直连 VM 上的服务(外出/手机 4G 时 SSH、访问 VM 里起的 web);公司机器别开,会被软件审计识别'
         Probe       = 'type -P tailscaled >/dev/null 2>&1'
         FinishHint  = "Tailscale:  VM 里跑 'sudo tailscale up' 配对(已预装,未配对)"
+    }
+    @{
+        Id          = 'path-map'
+        Name        = '路径映射记忆'
+        RebuildOnly = $false   # 非 cloud-init 特性:Start-ClaudeDev 挂载后直接写,现有 VM 立即生效
+        Description = '往 VM 内 Claude Code 全局记忆写宿主机↔VM 路径映射,对话里贴 Windows 路径自动换算成挂载点路径'
+        Probe       = '[ -f ~/.claude/CLAUDE.md ] && grep -q "cc-sandbox:begin" ~/.claude/CLAUDE.md'
+        FinishHint  = ''
     }
 )
 
@@ -656,6 +673,83 @@ function Set-HostMountReadOnly {
     return $true
 }
 
+# ====== VM 内 Claude Code 全局记忆:宿主机 ↔ VM 路径映射(可选特性 path-map) ======
+# 往 VM 本地 ~/.claude/CLAUDE.md 写 managed block(<!-- cc-sandbox:begin/end --> 标记之间,
+# 每次 start 按当前挂载整块刷新,块外用户自己写的内容保留)。
+# 目的:用户在对话里贴宿主机(Windows)路径时,VM 里的 Claude Code 按表换算成挂载点路径。
+# -Mappings 传映射写块;-Remove 删块(取消勾选时用,幂等,无块时无操作)。
+# 失败只警告不 throw(CLAUDE.md 写不进不影响 VM 可用性,对齐 Try-Mount 语义)
+function Set-VMClaudeMemory {
+    param(
+        # 每项 @{ HostPrefix=<宿主机绝对路径>; VmPath=<VM 内绝对路径> }
+        [AllowEmptyCollection()] [array]$Mappings = @(),
+        [switch]$Remove
+    )
+
+    if ($Remove) {
+        # 删旧块 + 剥尾部空行;文件不存在直接成功(幂等)
+        $script = 'f=/home/ubuntu/.claude/CLAUDE.md; [ -f "$f" ] || exit 0; sed -i "/^<!-- cc-sandbox:begin/,/^<!-- cc-sandbox:end -->/d" "$f"; while [ -s "$f" ] && [ -z "$(tail -n 1 "$f")" ]; do sed -i "\$d" "$f"; done; exit 0'
+        $r = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'bash', '-c', $script) -TimeoutSec 30
+        if ($r.TimedOut -or $r.ExitCode -ne 0) {
+            Write-Warn "移除 VM 内路径映射块失败:$($r.Stderr)(不影响其他功能)"
+        } else {
+            Write-Ok "已移除 VM 内路径映射块(~/.claude/CLAUDE.md)"
+        }
+        return
+    }
+
+    # 宿主侧拼好整块 markdown,VM 端只做整块替换(避免多行/引号穿透 exec 传参)
+    $rows = ($Mappings | ForEach-Object {
+        "| ``$($_.HostPrefix)`` | ``$($_.VmPath)`` |"
+    }) -join "`n"
+    $exampleHost = "$($Mappings[0].HostPrefix)\test-project\.gitignore"
+    $exampleVm   = "$($Mappings[0].VmPath)/test-project/.gitignore"
+
+    $block = @'
+<!-- cc-sandbox:begin -->
+## 沙箱环境(cc-sandbox 自动生成,勿手改本区块)
+
+你在 Multipass Ubuntu VM(claude-dev)里运行,不是在用户的 Windows 宿主机上。
+workspace 由宿主机挂载进来,同一文件两边路径不同;用户消息里的 Windows 路径,按表换算后再操作。
+
+### 宿主机路径 ↔ VM 路径映射
+
+| 宿主机路径前缀 | VM 内路径 |
+| --- | --- |
+{{MAPPING_ROWS}}
+
+换算规则:
+
+- 命中判断忽略大小写:用户路径等于某前缀,或以"前缀 + `\`"开头,即命中该行。
+- 命中后把前缀部分替换为对应 VM 路径,余下路径的 `\` 换成 `/`。例:`{{EXAMPLE_HOST}}` → `{{EXAMPLE_VM}}`。
+- 反向同理:给用户展示文件位置时换算回宿主机路径,方便其在 Windows 侧定位。
+- 前缀不在表中的宿主机路径未挂载进 VM,无法访问,应明确告知用户。
+<!-- cc-sandbox:end -->
+'@
+    $block = $block.Replace('{{MAPPING_ROWS}}', $rows).Replace('{{EXAMPLE_HOST}}', $exampleHost).Replace('{{EXAMPLE_VM}}', $exampleVm)
+
+    # 块文件经 transfer 传入(避免引号/换行穿透 exec 参数),UTF-8 无 BOM
+    $blockHost = Join-Path $env:TEMP "cc-sandbox-claude-block.md"
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($blockHost, $block + "`n", $utf8NoBom)
+
+    $transfer = Invoke-Multipass -ArgumentList @('transfer', $blockHost, "${vmName}:/tmp/cc-sandbox-claude-block.md") -TimeoutSec 30
+    if ($transfer.TimedOut -or $transfer.ExitCode -ne 0) {
+        $err = if ($transfer.TimedOut) { "超时" } elseif ($transfer.Stderr) { $transfer.Stderr.Trim() } else { "(无 stderr)" }
+        Write-Warn "路径映射块传入 VM 失败:$err(VM 里 Claude Code 不会自动换算宿主机路径,其余不受影响)"
+        return
+    }
+    # 幂等整块替换:删旧块(若有)→ 剥尾部空行 → 非空文件补一个分隔空行 → 追加新块
+    $merge = 'mkdir -p /home/ubuntu/.claude && touch /home/ubuntu/.claude/CLAUDE.md && sed -i "/^<!-- cc-sandbox:begin/,/^<!-- cc-sandbox:end -->/d" /home/ubuntu/.claude/CLAUDE.md && f=/home/ubuntu/.claude/CLAUDE.md; while [ -s "$f" ] && [ -z "$(tail -n 1 "$f")" ]; do sed -i "\$d" "$f"; done; [ -s "$f" ] && printf "\n" >> "$f"; cat /tmp/cc-sandbox-claude-block.md >> "$f" && rm -f /tmp/cc-sandbox-claude-block.md'
+    $r = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'bash', '-c', $merge) -TimeoutSec 30
+    if ($r.TimedOut -or $r.ExitCode -ne 0) {
+        $err = if ($r.TimedOut) { "超时" } elseif ($r.Stderr) { $r.Stderr.Trim() } else { "(无 stderr)" }
+        Write-Warn "路径映射块写入 ~/.claude/CLAUDE.md 失败:$err"
+        return
+    }
+    Write-Ok "已写入宿主机↔VM 路径映射到 VM ~/.claude/CLAUDE.md($($Mappings.Count) 条)"
+}
+
 # ====== ExtraMounts:来源(参数优先,否则读 mounts.txt) ======
 # 返回 string[];无参数且配置文件不存在/为空 → 返回空数组(调用方跳过)
 function Get-ExtraMountsSource {
@@ -911,6 +1005,11 @@ function Start-ClaudeDev {
         throw "-WorkspaceHost 必须是已存在的目录: $WorkspaceHost"
     }
     $resolvedExtraMounts = if ($extraItems.Count -gt 0) { Resolve-ExtraMounts -Items $extraItems } else { @() }
+    # 零挂载的 -NoRootWorkspace 属配置不完整:VM workspace 会是本地空目录,
+    # path-map 也无映射可写(勾选了却不生效)。与上面两条校验同风格,启动前拦下
+    if ($NoRootWorkspace -and $resolvedExtraMounts.Count -eq 0) {
+        throw "-NoRootWorkspace 需要至少一个挂载:$StateDir\mounts.txt 不存在或为空,且未传 -ExtraMounts。把 $StateDir\mounts.example.txt 复制为 mounts.txt,填入宿主目录(每行一个)后重跑;或直接传 -ExtraMounts"
+    }
 
     # 可选特性:交互菜单(真人终端)> features.txt;选择统一写回 features.txt(重建后不丢)
     $enabledFeatures = Resolve-OptionalFeatures
@@ -1106,6 +1205,24 @@ function Start-ClaudeDev {
         if (-not (Mount-ExtraMounts -Mounts $resolvedExtraMounts)) {
             throw "一个或多个额外挂载失败,停止启动以避免 workspace 数据位置不确定"
         }
+    }
+
+    # 可选特性 path-map(非重建型,现有 VM 立即生效):挂载已定,按实际映射生成说明块
+    if ($enabledFeatures -contains 'path-map') {
+        $pathMappings = @()
+        if ($NoRootWorkspace) {
+            foreach ($m in $resolvedExtraMounts) {
+                $pathMappings += @{ HostPrefix = $m.HostPath; VmPath = $m.Target }
+            }
+        } else {
+            # $wsHost 在上面单根挂载分支赋值(PS 无块作用域,函数级可见)
+            $pathMappings += @{ HostPrefix = $wsHost; VmPath = $mountWorkspace }
+        }
+        # 零挂载已在开头 fail-fast(多目录),单根模式恒有 $wsHost,$pathMappings 必非空
+        Set-VMClaudeMemory -Mappings $pathMappings
+    } else {
+        # 取消勾选时移除旧块,VM 内状态与勾选保持一致(幂等,无块时无操作)
+        Set-VMClaudeMemory -Remove
     }
 
     # SSH 反向隧道(仅当宿主机 ANTHROPIC_BASE_URL 指向本地代理时;公网直连则跳过)

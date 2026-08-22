@@ -1,6 +1,6 @@
 # cc-sandbox 验证清单
 
-回归测试用。按顺序跑,前 4 项 + 测试 6(cc-pocket 随 bundle)必跑,测试 5(Tailscale)/ 测试 7(可选特性菜单)可选。每次改 scripts\launch.ps1 / assets\cloud-init.yaml / assets\tmux.conf 后建议至少跑 1 + 4。
+回归测试用。按顺序跑,前 4 项 + 测试 6(cc-pocket 随 bundle)必跑,测试 5(Tailscale)/ 测试 7(可选特性菜单)/ 测试 8(路径映射记忆)可选。每次改 scripts\launch.ps1 / assets\cloud-init.yaml / assets\tmux.conf 后建议至少跑 1 + 4。
 
 **通用约定**:
 - 所有 `multipass exec claude-dev -- bash -lc "..."` 命令**别换成 `cat ~/.claude/settings.json`** —— 该文件含明文 token,见 troubleshooting §C。
@@ -159,11 +159,16 @@ multipass exec claude-dev -- bash -lc "findmnt | grep /home/ubuntu/workspace"
 
 # (f) -WorkspaceHost 目录不存在
 .\scripts\launch.ps1 start -WorkspaceHost "D:\nonexistent-ws"
+
+# (g) -NoRootWorkspace 但 mounts.txt 不存在/为空且未传 -ExtraMounts(零挂载)
+#     先临时改名 mounts.txt: Rename-Item "$env:USERPROFILE\.cc-sandbox\mounts.txt" mounts.txt.bak
+.\scripts\launch.ps1 start -NoRootWorkspace
+# 预期额外:状态目录自动出现 mounts.example.txt 模板(已存在则不覆盖)
 ```
 
 ### 预期
 
-六条都报 PowerShell throw,提示 `不能同时使用` / `请加 -NoRootWorkspace` / `宿主机目录不存在` / `不允许含 '..'` / `子目录名重复` / `-WorkspaceHost 必须是已存在的目录`。**不进 launch**。
+七条都报 PowerShell throw,提示 `不能同时使用` / `请加 -NoRootWorkspace` / `宿主机目录不存在` / `不允许含 '..'` / `子目录名重复` / `-WorkspaceHost 必须是已存在的目录` / `-NoRootWorkspace 需要至少一个挂载`。**不进 launch**;(g) 报错文案指向状态目录的 `mounts.example.txt` 模板。
 
 ---
 
@@ -258,6 +263,41 @@ cmd /c ".\scripts\launch.ps1 start < nul"
 | (d) 非交互 | 不弹菜单直接沿用 features.txt,输出"可选特性: Tailscale" |
 | (e) status | "可选特性" 段列出已启用项 |
 | (f) 关闭 | 选 n 后重建,VM 内 `which tailscale` 无输出 |
+
+---
+
+## 测试 8:路径映射记忆(path-map,建议跑)
+
+**目的**:验证可选特性 path-map——start 往 VM 内 `~/.claude/CLAUDE.md` 写入宿主机↔VM 路径映射块;取消勾选后块被移除。
+
+### 步骤(非交互下模拟勾选 = 直接编辑 features.txt)
+
+```powershell
+# (a) 启用:features.txt 加一行 path-map(交互终端则裸跑 start 菜单勾选)
+Add-Content "$env:USERPROFILE\.cc-sandbox\features.txt" "path-map"
+.\scripts\launch.ps1 start -NoRootWorkspace    # 唤醒/重挂后应打印"已写入宿主机↔VM 路径映射"
+
+# (b) VM 内看映射块(多目录模式:每条挂载一行 + .claude-host 只读行)
+multipass exec claude-dev -- bash -lc "sed -n '/cc-sandbox:begin/,/cc-sandbox:end/p' ~/.claude/CLAUDE.md"
+
+# (c) 幂等:再跑一次 start,块不重复(计数应为 1、总行数不变)
+.\scripts\launch.ps1 start -NoRootWorkspace
+multipass exec claude-dev -- bash -lc "grep -c 'cc-sandbox:begin' ~/.claude/CLAUDE.md; wc -l < ~/.claude/CLAUDE.md"
+
+# (d) 取消勾选:start 后块应被移除(计数应为 0)
+(Get-Content "$env:USERPROFILE\.cc-sandbox\features.txt") | Where-Object { $_ -ne 'path-map' } | Set-Content "$env:USERPROFILE\.cc-sandbox\features.txt"
+.\scripts\launch.ps1 start -NoRootWorkspace
+multipass exec claude-dev -- bash -lc "grep -c 'cc-sandbox:begin' ~/.claude/CLAUDE.md"
+```
+
+### 预期汇总
+
+| 检查项 | 预期 |
+|---|---|
+| (a) start 输出 | `已写入宿主机↔VM 路径映射到 VM ~/.claude/CLAUDE.md(N 条)` |
+| (b) 映射块内容 | 表格仅含 workspace 挂载:mounts.txt 每条挂载一行(前缀=宿主绝对路径、VM 路径=`/home/ubuntu/workspace/<子目录>`),不含 `.claude-host` 条目;含 `.gitignore` 换算示例 |
+| (c) 幂等 | begin 计数 = 1;重复 start 后总行数不变(不累积空行/重复块) |
+| (d) 移除 | begin 计数 = 0;`CLAUDE.md` 若有块外内容应保留 |
 
 ---
 
