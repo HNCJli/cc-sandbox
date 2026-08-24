@@ -1,6 +1,6 @@
 # cc-sandbox 验证清单
 
-回归测试用。按顺序跑,前 4 项 + 测试 6(cc-pocket 随 bundle)必跑,测试 5(Tailscale)/ 测试 7(可选特性菜单)/ 测试 8(路径映射记忆)可选。每次改 scripts\launch.ps1 / assets\cloud-init.yaml / assets\tmux.conf 后建议至少跑 1 + 4。
+回归测试用。按顺序跑,前 4 项 + 测试 6(cc-pocket 随 bundle)必跑,测试 5(Tailscale)/ 测试 7(可选特性菜单)/ 测试 8(路径映射记忆)/ 测试 9(剪贴板图片粘贴)可选。每次改 scripts\launch.ps1 / assets\cloud-init.yaml / assets\tmux.conf 后建议至少跑 1 + 4。
 
 **通用约定**:
 - 所有 `multipass exec claude-dev -- bash -lc "..."` 命令**别换成 `cat ~/.claude/settings.json`** —— 该文件含明文 token,见 troubleshooting §C。
@@ -298,6 +298,62 @@ multipass exec claude-dev -- bash -lc "grep -c 'cc-sandbox:begin' ~/.claude/CLAU
 | (b) 映射块内容 | 表格仅含 workspace 挂载:mounts.txt 每条挂载一行(前缀=宿主绝对路径、VM 路径=`/home/ubuntu/workspace/<子目录>`),不含 `.claude-host` 条目;含 `.gitignore` 换算示例 |
 | (c) 幂等 | begin 计数 = 1;重复 start 后总行数不变(不累积空行/重复块) |
 | (d) 移除 | begin 计数 = 0;`CLAUDE.md` 若有块外内容应保留 |
+
+---
+
+## 测试 9:剪贴板图片粘贴(clip-bridge,建议跑)
+
+**目的**:验证可选特性 clip-bridge——start 自动拉起宿主 daemon、部署 VM 垫片、起专享反向隧道;文本/图片都能经桥读取;取消勾选后 daemon/隧道停。
+
+### 步骤(非交互下模拟勾选 = 直接编辑 features.txt)
+
+```powershell
+# (a) 启用:features.txt 加一行 clip-bridge(交互终端则裸跑 start 菜单勾选)
+Add-Content "$env:USERPROFILE\.cc-sandbox\features.txt" "clip-bridge"
+.\scripts\launch.ps1 start
+# 预期输出:daemon PID → 垫片已装 → 桥隧道 PID → "剪贴板桥端到端通(VM → 宿主 daemon)"
+
+# (b) status 显示桥三件套
+.\scripts\launch.ps1 status
+# 预期:"剪贴板桥"段:宿主 daemon 在跑 + 桥隧道在跑 + "VM → 宿主 daemon 通(粘图可用)"
+
+# (c) 宿主机剪贴板放一段文本,VM 里经垫片读回
+Set-Clipboard "bridge-text-test"
+multipass exec claude-dev -- bash -lc '/usr/local/bin/xclip -selection clipboard -o'
+# 预期:输出 bridge-text-test
+
+# (d) 剪贴板放一张图(截图或复制图片文件),垫片应报 image/png 并能取到 PNG
+multipass exec claude-dev -- bash -lc '/usr/local/bin/xclip -selection clipboard -t TARGETS -o'
+# 预期:含 image/png 一行
+multipass exec claude-dev -- bash -lc '/usr/local/bin/xclip -selection clipboard -t image/png -o | head -c 8 | od -An -tx1'
+# 预期:89 50 4e 47 开头(PNG magic number)
+
+# (e) 幂等:再跑一次 start 不报错;wl-paste 垫片在位
+multipass exec claude-dev -- bash -lc '/usr/local/bin/wl-paste --list-types'
+
+# (f) 取消勾选:start 后 daemon/隧道应停(features.txt 删掉 clip-bridge 行)
+(Get-Content "$env:USERPROFILE\.cc-sandbox\features.txt") | Where-Object { $_ -ne 'clip-bridge' } | Set-Content "$env:USERPROFILE\.cc-sandbox\features.txt"
+.\scripts\launch.ps1 start
+.\scripts\launch.ps1 status
+# 预期:"剪贴板桥"段显示未启用;宿主机上 daemon 进程已退出
+
+# (g) 真人端到端:记事本写 HELLO-9527 → Win+Shift+S 截图 → VM 里 claude 按 Ctrl+V
+#     → 问"图里写了什么数字" → 应答出 9527
+#     前置:所用终端没占用 Ctrl+V(Warp 实测占用者是 Alternate Terminal Paste,
+#     见 troubleshooting.md §G);Ctrl+V 没反应先按 §G 判别终端拦截
+```
+
+### 预期汇总
+
+| 检查项 | 预期 |
+|---|---|
+| (a) start 输出 | daemon PID / 垫片已装 / 桥隧道 PID / 端到端通 |
+| (b) status | daemon + 桥隧道 + VM→宿主探测三条 OK |
+| (c) 文本读取 | 输出放入剪贴板的字符串 |
+| (d) 图片读取 | TARGETS 含 image/png;取回字节以 `89 50 4e 47` 开头 |
+| (e) 幂等 | 重复 start 无报错;wl-paste --list-types 正常 |
+| (f) 关闭 | status 显示未启用;宿主 daemon 进程退出 |
+| (g) 真人粘图 | 附件出现 + 模型答出图中文字;附件在但答不出 = 网关丢 image 块(见 §G) |
 
 ---
 

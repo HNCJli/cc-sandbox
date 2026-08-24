@@ -4,11 +4,12 @@
 # 可用特性 id(见 scripts\launch.ps1 的 $optionalFeatures):
 #   tailscale   跨网络直连 VM 上的服务(公司机器别开,会被软件审计识别)
 #   path-map    VM 里 Claude Code 自动把对话里的宿主机 Windows 路径换算成挂载点路径
+#   clip-bridge 宿主机截图 → VM 里 Claude Code Ctrl+V 直接粘图(非重建型,勾上即生效)
 #
 # 示例(启用 tailscale):
 # tailscale
 #
 # 特性标记为"重建型"的(如 tailscale)需 delete + start 重建 VM 才生效;
 # 交互终端下 start 会探测并询问是否立即重建。
-# 非重建型的(如 path-map)勾上后现有 VM 下次 start 即生效,取消勾选即移除
+# 非重建型的(如 path-map、clip-bridge)勾上后现有 VM 下次 start 即生效
 # 此文件放在状态目录(默认 %USERPROFILE%\.cc-sandbox\features.txt),不进仓库

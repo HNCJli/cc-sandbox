@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# cc-sandbox 剪贴板桥 xclip 垫片(拦截协议参考 cc-clip)
+# 只拦截 Claude Code 的剪贴板读取形态;其余形态透传 /usr/bin/xclip(若装了)。
+# 隧道由宿主机 launch.ps1 start 以 ssh -R 建好,垫片只打 VM 回环;
+# curl 失败 = 桥不通(隧道未起/宿主 daemon 没跑),回落真 xclip 或失败退出,与无桥行为一致。
+# 部署:/usr/local/bin/xclip(PATH 恒优先于 /usr/bin,避开 ~/.local/bin 的 PATH 优先级坑)
+
+PORT="${CC_SANDBOX_CLIP_PORT:-18339}"
+BASE="http://127.0.0.1:${PORT}"
+
+# 无 -o = 非读取形态(写入等),透传
+out=0
+for a in "$@"; do
+    [ "$a" = "-o" ] && out=1
+done
+if [ "$out" != "1" ]; then
+    [ -x /usr/bin/xclip ] && exec /usr/bin/xclip "$@"
+    exit 1
+fi
+
+# 解析 -t <target>(xclip 语法:-t 与目标值分离;无 -t 时默认 UTF8_STRING)
+target=""
+args=("$@")
+n=${#args[@]}
+for ((i = 0; i < n; i++)); do
+    if [ "${args[$i]}" = "-t" ] && [ $((i + 1)) -lt "$n" ]; then
+        target="${args[$((i + 1))]}"
+    fi
+done
+
+# TARGETS:报告剪贴板里有什么(claude 先问这个再取内容)
+if [ "$target" = "TARGETS" ]; then
+    state="$(curl -fsS --max-time 2 "$BASE/clip/state" 2>/dev/null)" || {
+        [ -x /usr/bin/xclip ] && exec /usr/bin/xclip "$@"
+        exit 1
+    }
+    printf '%s\n' 'TARGETS'
+    case "$state" in
+        *'"image":true'*) printf '%s\n' 'image/png' ;;
+    esac
+    case "$state" in
+        *'"text":true'*) printf '%s\n' 'UTF8_STRING' 'text/plain;charset=utf-8' 'text/plain' 'STRING' 'TEXT' ;;
+    esac
+    exit 0
+fi
+
+case "$target" in
+    image/*)
+        # 图片内容:curl -f 在 404(无图)时退出码非零,原样传给调用方
+        exec curl -fsS --max-time 5 "$BASE/clip/image"
+        ;;
+    '' | UTF8_STRING | STRING | TEXT | text/plain*)
+        exec curl -fsS --max-time 3 "$BASE/clip/text"
+        ;;
+    *)
+        [ -x /usr/bin/xclip ] && exec /usr/bin/xclip "$@"
+        exit 1
+        ;;
+esac

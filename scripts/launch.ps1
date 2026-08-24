@@ -61,6 +61,7 @@ $vmName         = "claude-dev"
 $vmImage        = "noble"                               # Ubuntu 24.04 LTS(换版本改这里)
 $mountClaudeHost = "/home/ubuntu/.claude-host"          # 宿主机 ~/.claude 挂到 VM 哪里
 $mountWorkspace = "/home/ubuntu/workspace"              # ./workspace 挂到 VM 哪里(放在 ~/ 下)
+$clipBridgePort  = 18339                                # 剪贴板桥端口(宿主 daemon 监听 / VM 垫片 curl,两端一致)
 # 可调项见 param() 块:$Cpus / $MemoryGB / $DiskGB / $CcSwitchPort / $AptMirror
 
 # cloud-init 基础包清单(单一来源:渲染进 cloud-init runcmd,progress.ps1 的 [x/N] 计数同源;
@@ -104,6 +105,14 @@ $optionalFeatures = @(
         Description = '往 VM 内 Claude Code 全局记忆写宿主机↔VM 路径映射,对话里贴 Windows 路径自动换算成挂载点路径'
         Probe       = '[ -f ~/.claude/CLAUDE.md ] && grep -q "cc-sandbox:begin" ~/.claude/CLAUDE.md'
         FinishHint  = ''
+    }
+    @{
+        Id          = 'clip-bridge'
+        Name        = '剪贴板图片粘贴'
+        RebuildOnly = $false   # 非重建型:每次 start 拉起宿主 daemon + 部署 VM 垫片 + 起专享反向隧道,现有 VM 立即生效
+        Description = '宿主机截图 → VM 里 Claude Code Ctrl+V 直接粘图(PowerShell 常驻服务 + 专享 SSH 反向隧道;multipass shell / ssh 进 VM 均可)'
+        Probe       = 'grep -q cc-sandbox /usr/local/bin/xclip 2>/dev/null'
+        FinishHint  = '剪贴板桥:  宿主机截图 → VM 里 claude 按 Ctrl+V 粘图(multipass shell / ssh 进 VM 均可)'
     }
 )
 
@@ -1116,6 +1125,123 @@ function Start-TunnelIfNeeded {
     }
 }
 
+# ====== 剪贴板桥(可选特性 clip-bridge,非重建型)======
+# 链路:宿主 scripts/clip-bridge/host-daemon.ps1(127.0.0.1:$clipBridgePort)
+#   ← 专享 ssh -R 隧道(.clip-tunnel.pid)← VM 内 /usr/local/bin/xclip、wl-paste 垫片。
+# 与 LLM 隧道相互独立(direct 模式下桥也照常);不依赖用户进 VM 的方式——垫片只打
+# VM 回环,multipass shell / ssh 进去都能粘图。
+# 未勾选时:停 daemon+隧道即恢复无桥行为;VM 垫片保留(桥不通时它透传/失败退出,
+# 与没装过等价),不为省一次 exec 清理去多跑一次探测。
+
+# 按 pidfile 停进程(剪贴板桥 daemon/隧道共用;文件不存在 = 无操作,幂等)
+function Stop-PidFileProcess {
+    param(
+        [Parameter(Mandatory)] [string]$PidFile,
+        [string]$Label = ''
+    )
+    if (-not (Test-Path $PidFile)) { return }
+    $procId = (Get-Content $PidFile -First 1).Trim()
+    if ($procId -and (Get-Process -Id $procId -ErrorAction SilentlyContinue)) {
+        Stop-Process -Id $procId -Force
+        if ($Label) { Write-Ok "$Label 已停(PID $procId)" }
+    }
+    Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
+}
+
+function Stop-ClipBridge {
+    Stop-PidFileProcess -PidFile (Join-Path $StateDir '.clip-tunnel.pid') -Label '剪贴板桥隧道'
+    Stop-PidFileProcess -PidFile (Join-Path $StateDir '.clip-daemon.pid') -Label '剪贴板桥 daemon'
+}
+
+# 勾选着 clip-bridge 的每次 start 全量执行(幂等,重装垫片自愈);失败只 warn 不阻塞
+# (可选增强,对齐 Try-Mount 语义;读外层 $StateDir/$vmName/$keyPath/$clipBridgePort,同 Start-TunnelIfNeeded)
+function Start-ClipBridge {
+    param([Parameter(Mandatory)] [AllowEmptyCollection()] [string[]]$EnabledFeatures)
+
+    # 幂等:先停旧 daemon/隧道,下面按需重起
+    Stop-ClipBridge
+    if ($EnabledFeatures -notcontains 'clip-bridge') { return }
+
+    $bridgeDir   = Join-Path $scriptDir 'clip-bridge'
+    $daemonScript = Join-Path $bridgeDir 'host-daemon.ps1'
+    $shimXclip    = Join-Path $bridgeDir 'vm-xclip'
+    $shimWlPaste  = Join-Path $bridgeDir 'vm-wl-paste'
+    foreach ($p in @($daemonScript, $shimXclip, $shimWlPaste)) {
+        if (-not (Test-Path $p)) { Write-Warn "剪贴板桥缺文件 $p,本次跳过"; return }
+    }
+
+    # 1) 宿主 daemon(隐藏窗口常驻;秒退只 warn,后续端到端检查会如实报告)
+    Write-Step "启动剪贴板桥 daemon(127.0.0.1:$clipBridgePort)..."
+    $daemonPidFile = Join-Path $StateDir '.clip-daemon.pid'
+    $daemonProc = Start-Process -FilePath 'powershell.exe' `
+        -ArgumentList (Join-ProcessArguments @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $daemonScript, '-Port', "$clipBridgePort")) `
+        -WindowStyle Hidden -PassThru
+    $daemonProc.Id | Out-File $daemonPidFile -Encoding ascii -Force
+    Start-Sleep -Milliseconds 1500
+    if ($daemonProc.HasExited) {
+        Write-Warn "剪贴板桥 daemon 秒退(ExitCode=$($daemonProc.ExitCode),端口被占?)。日志: $StateDir\clip-daemon.log"
+    } else {
+        Write-Ok "daemon PID $($daemonProc.Id)"
+    }
+
+    # 2) VM 垫片:transfer + sudo install(每次覆盖;装 /usr/local/bin,PATH 恒优先于 /usr/bin,
+    #    避开 cc-clip 踩过的 ~/.local/bin PATH 优先级坑)
+    Write-Step "部署 VM 剪贴板垫片..."
+    foreach ($pair in @(@($shimXclip, 'xclip'), @($shimWlPaste, 'wl-paste'))) {
+        $t = Invoke-Multipass -ArgumentList @('transfer', $pair[0], "${vmName}:/tmp/cc-sandbox-$($pair[1])") -TimeoutSec 30
+        if ($t.TimedOut -or $t.ExitCode -ne 0) {
+            $err = if ($t.TimedOut) { "超时" } elseif ($t.Stderr) { $t.Stderr.Trim() } else { "(无 stderr)" }
+            Write-Warn "垫片 $($pair[1]) 传入 VM 失败:$err(剪贴板桥本次不可用,其余不受影响)"
+            return
+        }
+    }
+    $installShims = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'sudo', 'bash', '-c',
+        "install -m 0755 /tmp/cc-sandbox-xclip /usr/local/bin/xclip && install -m 0755 /tmp/cc-sandbox-wl-paste /usr/local/bin/wl-paste && rm -f /tmp/cc-sandbox-xclip /tmp/cc-sandbox-wl-paste") -TimeoutSec 30
+    if ($installShims.TimedOut -or $installShims.ExitCode -ne 0) {
+        $err = if ($installShims.TimedOut) { "超时" } elseif ($installShims.Stderr) { $installShims.Stderr.Trim() } else { "(无 stderr)" }
+        Write-Warn "VM 垫片安装失败:$err(剪贴板桥本次不可用,其余不受影响)"
+        return
+    }
+    Write-Ok "垫片已装(/usr/local/bin/xclip、wl-paste)"
+
+    # 3) 专享反向隧道(独立 pidfile .clip-tunnel.pid;不设 ExitOnForwardFailure——失败多半是
+    #    VM 侧端口被残留会话占,隧道进程仍可用于下次;端到端检查会如实暴露)
+    $vmIp = Get-VmIp
+    if (-not $vmIp) { Write-Warn "无法获取 VM IP,剪贴板桥隧道未起"; return }
+    $knownHosts = Join-Path $env:TEMP "claude-dev-known-hosts"
+    $clipTunnelArgs = @(
+        "-nNT",
+        "-R", "${clipBridgePort}:127.0.0.1:${clipBridgePort}",
+        "-i", $keyPath,
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "UserKnownHostsFile=$knownHosts",
+        "-o", "ServerAliveInterval=30",
+        "ubuntu@$vmIp"
+    )
+    $clipTunnelProc = Start-Process -FilePath ssh -ArgumentList (Join-ProcessArguments -Arguments $clipTunnelArgs) -PassThru -WindowStyle Hidden
+    Start-Sleep -Milliseconds 800
+    if ($clipTunnelProc.HasExited) {
+        Write-Warn "剪贴板桥隧道秒退,ExitCode=$($clipTunnelProc.ExitCode)(重跑 start 可自愈)"
+        return
+    }
+    $clipTunnelProc.Id | Out-File (Join-Path $StateDir '.clip-tunnel.pid') -Encoding ascii -Force
+    Write-Ok "桥隧道 PID $($clipTunnelProc.Id)"
+
+    # 4) 端到端验证(短重试,容忍隧道建立延迟)
+    $e2eOk = $false
+    foreach ($try in 1..3) {
+        $probe = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'bash', '-c',
+            "curl -fsS --max-time 5 http://127.0.0.1:$clipBridgePort/health 2>/dev/null || echo BRIDGE_DOWN") -TimeoutSec 20
+        if (-not $probe.TimedOut -and $probe.Stdout -match '"status":"ok"') { $e2eOk = $true; break }
+        Start-Sleep -Seconds 2
+    }
+    if ($e2eOk) {
+        Write-Ok "剪贴板桥端到端通(VM → 宿主 daemon)"
+    } else {
+        Write-Warn "剪贴板桥端到端未通(daemon/隧道进程在跑,但 VM 探测失败)。进 VM 验证: curl http://127.0.0.1:$clipBridgePort/health"
+    }
+}
+
 # ====== start ======
 function Start-ClaudeDev {
     Assert-Prerequisites
@@ -1227,6 +1353,7 @@ function Start-ClaudeDev {
     Invoke-BundlePhase
     Invoke-MountPhase -Mounts $mounts -EnabledFeatures $enabledFeatures
     Start-TunnelIfNeeded
+    Start-ClipBridge -EnabledFeatures $enabledFeatures
 
     Write-Host ""
     Complete-StartupProgress -EnabledFeatures $enabledFeatures
@@ -1250,6 +1377,8 @@ function Start-ClaudeDev {
 function Stop-ClaudeDev {
     Write-Step "停隧道..."
     Stop-Tunnel
+    Write-Step "停剪贴板桥..."
+    Stop-ClipBridge
     Write-Step "停 VM..."
     Invoke-VmActionGraceful -MultipassArgs @('stop', $vmName) -DoneMsg "VM 已停" -AbsentMsg "VM 已停止或不存在,跳过"
 }
@@ -1282,6 +1411,45 @@ function Show-Status {
         } else {
             Write-Warn ".tunnel.pid 不存在(隧道未起)"
         }
+    }
+
+    Write-Step "剪贴板桥"
+    if (@(Get-SavedFeatureIds) -contains 'clip-bridge') {
+        $clipDaemonPidFile = Join-Path $StateDir '.clip-daemon.pid'
+        $clipDaemonOk = $false
+        $clipDaemonPid = ''
+        if (Test-Path $clipDaemonPidFile) {
+            $clipDaemonPid = (Get-Content $clipDaemonPidFile -First 1).Trim()
+            if ($clipDaemonPid -and (Get-Process -Id $clipDaemonPid -ErrorAction SilentlyContinue)) {
+                $null = & curl.exe -s --max-time 3 "http://127.0.0.1:$clipBridgePort/health" 2>$null
+                $clipDaemonOk = ($LASTEXITCODE -eq 0)
+            }
+        }
+        if ($clipDaemonOk) { Write-Ok "宿主 daemon 在跑(PID $clipDaemonPid,/health ok)" }
+        else { Write-Warn "宿主 daemon 未响应(重跑 start 自愈;日志 $StateDir\clip-daemon.log)" }
+
+        $clipTunnelPidFile = Join-Path $StateDir '.clip-tunnel.pid'
+        if (Test-Path $clipTunnelPidFile) {
+            $clipTunnelPid = (Get-Content $clipTunnelPidFile -First 1).Trim()
+            if ($clipTunnelPid -and (Get-Process -Id $clipTunnelPid -ErrorAction SilentlyContinue)) {
+                Write-Ok "桥隧道在跑 PID $clipTunnelPid"
+                if ((Get-VmState) -eq 'Running') {
+                    $probe = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'bash', '-c',
+                        "curl -fsS --max-time 5 http://127.0.0.1:$clipBridgePort/health 2>/dev/null || echo DOWN") -TimeoutSec 20
+                    if (-not $probe.TimedOut -and $probe.Stdout -match '"status":"ok"') {
+                        Write-Ok "VM → 宿主 daemon 通(粘图可用)"
+                    } else {
+                        Write-Warn "VM 内探测 /health 未通(重跑 start 自愈)"
+                    }
+                }
+            } else {
+                Write-Warn ".clip-tunnel.pid 写了 PID $clipTunnelPid 但进程已死"
+            }
+        } else {
+            Write-Warn ".clip-tunnel.pid 不存在(桥隧道未起)"
+        }
+    } else {
+        Write-Host "    未启用(features.txt 无 clip-bridge)" -ForegroundColor DarkGray
     }
 
     Write-Step "可选特性"
@@ -1324,6 +1492,8 @@ function Show-Status {
 function Delete-ClaudeDev {
     Write-Step "清理隧道..."
     Stop-Tunnel
+    Write-Step "清理剪贴板桥..."
+    Stop-ClipBridge
     Write-Step "删 VM..."
     Invoke-VmActionGraceful -MultipassArgs @('delete', '--purge', $vmName) -DoneMsg "VM 已删除并清理"
     Write-Host ""

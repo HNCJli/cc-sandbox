@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# cc-sandbox 剪贴板桥 wl-paste 垫片(拦截协议参考 cc-clip)
+# 只处理读取:--list-types / -l 列形态、--type X 取指定形态、无参数取文本。
+# 其余形态(--watch/-w、--clear 等)透传真 wl-paste(若装了),没有则失败,与无桥行为一致。
+# 部署:/usr/local/bin/wl-paste
+
+PORT="${CC_SANDBOX_CLIP_PORT:-18339}"
+BASE="http://127.0.0.1:${PORT}"
+
+list=0
+type_arg=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --list-types | -l) list=1 ;;
+        --type | -t) shift; type_arg="${1:-}" ;;
+        -t?*) type_arg="${1#-t}" ;;
+    esac
+    shift
+done
+
+if [ "$list" = "1" ]; then
+    state="$(curl -fsS --max-time 2 "$BASE/clip/state" 2>/dev/null)" || exit 1
+    case "$state" in
+        *'"image":true'*) printf '%s\n' 'image/png' ;;
+    esac
+    case "$state" in
+        *'"text":true'*) printf '%s\n' 'text/plain;charset=utf-8' 'text/plain' ;;
+    esac
+    exit 0
+fi
+
+case "$type_arg" in
+    image/*)
+        exec curl -fsS --max-time 5 "$BASE/clip/image"
+        ;;
+    '' | text/* | UTF8_STRING)
+        exec curl -fsS --max-time 3 "$BASE/clip/text"
+        ;;
+    *)
+        [ -x /usr/bin/wl-paste ] && exec /usr/bin/wl-paste "$@"
+        exit 1
+        ;;
+esac

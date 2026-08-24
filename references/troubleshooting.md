@@ -80,7 +80,7 @@ multipass exec claude-dev -- sudo cat /var/log/cloud-init-output.log
 
 ---
 
-# 深度排障(§A–§F)
+# 深度排障(§A–§G)
 
 按主流程报错的现象查对应小节。**这些都是"遇到才处理"的分支,不是每台机器都会碰到。** 涉及改全局设置或文件权限的动作(§A/§C),先跟用户确认再执行——这是对外可见的状态改动。
 
@@ -298,6 +298,49 @@ multipass list
 ```
 
 若强制结束服务进程后仍无法启动服务,或 `multipass list` 仍卡住,重启 Windows 后再验证 `multipass list`;恢复前不要 delete/rebuild VM。
+
+## §G 剪贴板桥:claude 里 Ctrl+V 没反应 / 粘图失败
+
+**现象**:status 的"剪贴板桥"三件套全绿,但 VM 里 claude 输入框按 Ctrl+V 完全没反应(连附件标记都不出现)。
+
+**最常见根因:终端自己吃掉了 Ctrl+V**。多数终端默认把 `Ctrl+V` 绑定为"粘贴文本"——按键被终端消费,从未到达 claude;而剪贴板里是图片(终端粘不了图),于是"什么都没发生"。
+
+**30 秒判别**:宿主机复制一段**文字** → claude 输入框按 `Ctrl+V`:
+
+- 文字被敲进输入框 → 实锤终端拦截,按下表解绑
+- 无任何反应 → 跳到下面的三层排查
+
+**解绑 Ctrl+V(实测 2026-08-23)**:
+
+| 终端 | 操作 |
+|---|---|
+| **Warp** | `Ctrl+,`(Ctrl 和逗号)→ Keyboard Shortcuts → 搜 `paste` → 占着 `Ctrl+V` 的是 **Alternate Terminal Paste**(实测如此,Paste 本身绑的是 Ctrl+Shift+V)→ 点该按键块,按 Backspace 清空。粘文本继续用 `Ctrl+Shift+V` |
+| Windows Terminal | `Ctrl+,` → 操作(Actions)→ 删除"粘贴 · Ctrl+V" → 粘文本用 Ctrl+Shift+V 或右键 |
+
+设置即时生效,不用重启终端,claude 里直接再按 Ctrl+V 验证。
+
+**不是终端拦截时的三层排查**(宿主机 PowerShell 逐条,哪层挂修哪层):
+
+```powershell
+# ① 宿主 daemon 活着吗(预期 {"status":"ok"})
+curl http://127.0.0.1:18339/health
+# ② VM 侧隧道通吗(预期 {"status":"ok"})
+multipass exec claude-dev -- bash -lc "curl -s --max-time 5 http://127.0.0.1:18339/health"
+# ③ 垫片在位且优先吗(预期 /usr/local/bin/xclip)
+multipass exec claude-dev -- bash -lc "which xclip"
+```
+
+任何一层不对 → 重跑 `.\scripts\launch.ps1 start`(自动重起 daemon/隧道、重装垫片)。桥是否真通,VM 里一条命令直测(宿主机剪贴板先放张图):
+
+```bash
+xclip -selection clipboard -t image/png -o | wc -c   # 吐出字节数 = 管道通
+```
+
+**另一种现象**:附件标记出现了,但模型说"看不到图/读不到图片内容"——桥没问题,是 **LLM 网关丢弃 image 块**(部分 OpenAI 协议中转对 Anthropic 协议图片内容的转换缺失)。换后端验证,别折腾桥。
+
+**判定后端是否真的能看图:红图验色法(30 秒)**。给后端发一张**纯色 PNG**(如纯红),问"这张图什么颜色?一个词"。答对颜色 = 通;答错(紫/蓝/黑…)= 后端断图。必须用已知颜色的图,不能问开放式问题——**模型会一本正经地瞎猜**(2026-08-24 实测:glm-5.3 的 thinking 里自述 "The image is likely a solid color" 然后猜了个错的颜色)。
+
+实测(2026-08-24):bigmodel 的 **Anthropic 兼容层**(`/api/anthropic`)对所有模型(glm-5.3 / glm-4.5v / glm-4.6v)都丢图,base64 图片块被转成模型取不到内容的 URL 引用;其**原生 API**(`/api/paas/v4`)视觉正常(glm-4v-flash 免费模型读色正确)。即:Claude Code + bigmodel = 看不了图,属网关缺陷,与本项目/剪贴板桥无关。出路:看图任务用 cc-switch 换后端,或等 bigmodel 修复;验证任何新后端,用上面的红图验色法。
 
 ## 安全提醒
 

@@ -1,3 +1,5 @@
 # VM 内执行的 bash 脚本必须是 LF:CRLF 会让 VM 里 bash 报语法错。
 # install-bundle.sh 经 multipass transfer 裸传输,无人做行尾归一化(其余 .sh 由渲染层归一化,此规则一并兜住)
 *.sh text eol=lf
+# 剪贴板桥垫片:无扩展名的 bash 脚本,同样经 transfer 裸传输,必须 LF
+scripts/clip-bridge/vm-* text eol=lf
