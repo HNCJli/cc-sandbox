@@ -7,15 +7,19 @@ description: 用 scripts/launch.ps1 在 Windows 上启动/唤醒 claude-dev Mult
 
 把 Claude Code 关进 Multipass Ubuntu VM(最大权限沙箱)。宿主机 cc-switch 写的 LLM env(token / base_url / 模型映射)只读同步进 VM;workspace 双向挂载。
 
-**平台:仅 Windows。** 后端 Hyper-V 或 VirtualBox。VM 名固定 `claude-dev`。
+**平台:仅 Windows。** 后端 Hyper-V 或 VirtualBox。默认 VM 名 `claude-dev`;**多 VM**:任意子命令带 `-Name <名字>` 起独立 VM(如 `start -Name dev-java`),状态按 VM 分目录,互不干扰。
 
 ## 目录约定(重要)
 
-本 skill 包是**只读**的,可整体覆盖升级;所有**可写状态**(bundle 缓存、mounts.txt、features.txt、SSH 密钥、隧道 pid)在状态目录,固定 `%USERPROFILE%\.cc-sandbox\`(写死,不提供参数/环境变量更换):
+本 skill 包是**只读**的,可整体覆盖升级;所有**可写状态**在状态目录,固定 `%USERPROFILE%\.cc-sandbox\`(写死,不提供参数/环境变量更换)。多 VM 布局:根目录放共享件,每台 VM 一个子目录:
 
 ```
-<skill 包>/                       # 只读:scripts/、assets/、references/
-%USERPROFILE%\.cc-sandbox\        # 可写:bundle\、mounts.txt、features.txt、.ssh-key、.tunnel.pid、mounts.example.txt
+<skill 包>/                          # 只读:scripts/、assets/、references/
+%USERPROFILE%\.cc-sandbox\
+    bundle\、.ssh-key、mounts.example.txt   # 共享(所有 VM 复用)
+    claude-dev\                       # 默认 VM 的可写状态
+        mounts.txt、features.txt、.tunnel.pid、.clip-tunnel.pid、.cloud-init.rendered.yaml
+    <其他VM名>\                       # start -Name <名字> 起的 VM,同上
 ```
 
 从仓库根(开发模式)或 skills 安装目录(用户模式)运行均可,脚本自动定位资产与状态。
@@ -45,7 +49,7 @@ ssh -V                      # OpenSSH 客户端
 
 不挂宿主根(嵌套挂载在 Windows Multipass 上不稳);**`~/workspace` 本身的内容在 delete VM 时会丢**(挂载子目录的内容在宿主机,不丢)。
 
-**可选特性(交互选择,不用记参数)**:可选特性(Tailscale、路径映射记忆、剪贴板图片粘贴等)**没有命令行开关**。真人 PowerShell 终端裸跑 `start` 会弹**方向键多选菜单**:↑↓ 移动高亮、空格 勾选/取消、回车 确认(数字键可直接切换某项,`a` 全选、`n` 全不选),选择持久化到状态目录 `features.txt`。直接回车 = 保持上次选择;不支持按键的终端(窗口过小/非 console 宿主)自动降级为编号输入;stdin 被重定向时(后台/管道/Claude 代跑)自动跳过菜单、静默沿用 `features.txt`(要改选择就编辑该文件)。新启用的"重建型"特性在 VM 已存在时会被探测到,交互询问是否立即 delete + 重建:答 `y` 一条命令完成(状态目录数据保留);答 `N`/回车跳过,VM 不动,下次 `delete + start` 才生效(收尾提示会注明包尚未装进 VM);非重建型特性(如路径映射记忆)不需重建,现有 VM 下次 `start` 即生效。特性清单见 [references/optional-features.md](references/optional-features.md)。
+**可选特性(交互选择,不用记参数)**:可选特性(Tailscale、路径映射记忆、剪贴板图片粘贴、预装开发环境 Java/Python/前端等)**没有命令行开关**。真人 PowerShell 终端裸跑 `start` 会弹**方向键多选菜单**:↑↓ 移动高亮、空格 勾选/取消、回车 确认(数字键可直接切换某项,`a` 全选、`n` 全不选),选择持久化到状态目录 `features.txt`。直接回车 = 保持上次选择;不支持按键的终端(窗口过小/非 console 宿主)自动降级为编号输入;stdin 被重定向时(后台/管道/Claude 代跑)自动跳过菜单、静默沿用 `features.txt`(要改选择就编辑该文件)。新启用的"重建型"特性在 VM 已存在时会被探测到,交互询问是否立即 delete + 重建:答 `y` 一条命令完成(状态目录数据保留);答 `N`/回车跳过,VM 不动,下次 `delete + start` 才生效(收尾提示会注明包尚未装进 VM);非重建型特性(如路径映射记忆)不需重建,现有 VM 下次 `start` 即生效。特性清单见 [references/optional-features.md](references/optional-features.md)。
 
 **`start` 全部参数**(共 5 个,均为可选:资源 3 个 + 端口 + APT 镜像):完整参数表见 [references/parameters.md](references/parameters.md)。权威来源:`scripts\launch.ps1` 顶部 `param()` 块。
 
@@ -115,10 +119,14 @@ systemctl --user enable --now cc-pocket-daemon
 ## 常用子命令
 
 ```powershell
-.\scripts\launch.ps1 status    # VM + 隧道/直连 + 可选特性 + LLM 接入探测
+.\scripts\launch.ps1 status    # 多台受管 VM 时给总览;单台时:VM + 隧道/直连 + 可选特性 + LLM 探测
 .\scripts\launch.ps1 stop      # 停隧道 + 停 VM(挂载持久,下次 start 自动重挂)
                                # 重启 VM = stop 再 start(数据保留);重装 VM = delete 再 start(全新 cloud-init)
-.\scripts\launch.ps1 delete    # 删 VM + 清隧道(状态目录里的 workspace/ 和 .ssh-key 保留)
+.\scripts\launch.ps1 delete    # 删 VM + 清隧道(共享件与该 VM 配置保留)
+# 多 VM:任意子命令加 -Name <名字>,如:
+.\scripts\launch.ps1 start -Name dev-java     # 起第二台(每台 4C/8G/30G,注意宿主机家底)
+.\scripts\launch.ps1 status -Name dev-java    # 单台详情
+.\scripts\launch.ps1 delete -Name dev-java    # 删指定台
 ```
 
 用户也可以不经过 Claude 手动跑这些命令(可在 PowerShell profile 里加

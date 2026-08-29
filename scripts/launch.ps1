@@ -2,21 +2,28 @@
 <#
     claude-dev VM lifecycle manager.
     Usage:
-        .\scripts\launch.ps1 start      # 创建/启动 VM + 挂载 + SSH 反向隧道
+        .\scripts\launch.ps1 start      # 创建/启动 VM + 挂载 + SSH 反向隧道(默认 VM 名 claude-dev)
                                        # (真人终端裸跑会弹"可选特性"多选菜单,回车=保持上次选择;
                                        #  管道/后台/重定向 stdin 时自动跳过菜单,读 features.txt)
         .\scripts\launch.ps1 stop       # 停隧道 + 停 VM
-        .\scripts\launch.ps1 status     # 看 VM 状态、隧道状态和已启用的可选特性
-        .\scripts\launch.ps1 delete     # 删 VM + 清理(不会删状态目录里的 workspace/ 和 .ssh-key)
+        .\scripts\launch.ps1 status     # 多台受管 VM 时给总览;单台时给详情
+        .\scripts\launch.ps1 delete     # 删 VM + 清理(状态目录配置保留)
 
-    可写状态(bundle/mounts.txt/features.txt/.ssh-key/.tunnel.pid)固定在
-    %USERPROFILE%\.cc-sandbox(写死,不提供参数/环境变量更换)。
+    多 VM:所有子命令支持 -Name <名字>(如 .\scripts\launch.ps1 start -Name dev-java),
+    不带 -Name 操作默认 VM claude-dev。状态按 VM 分目录(%USERPROFILE%\.cc-sandbox\<名字>\),
+    共享件(bundle 离线包、.ssh-key、剪贴板桥 daemon)在根目录;每台默认 4C/8G/30G,多开自己算家底。
+
+    可写状态固定在 %USERPROFILE%\.cc-sandbox(写死,不提供参数/环境变量更换)。
 #>
 
 param(
     [Parameter(Position = 0)]
     [ValidateSet("start", "stop", "status", "delete")]
     [string]$Action = "start",
+
+    # VM 名(多 VM):所有子命令可用;不带 = 默认 claude-dev
+    [ValidatePattern('^[a-z0-9][a-z0-9-]*$')]
+    [string]$Name = 'claude-dev',
 
     # 可调配置(默认值就在此 param() 块)
     [int]$Cpus         = 4,
@@ -43,8 +50,28 @@ $assetsDir = (Get-Item (Join-Path $scriptDir '..\assets')).FullName
 if (-not (Test-Path (Join-Path $assetsDir 'cloud-init.yaml'))) { throw "assets 目录不完整: $assetsDir(skill 包损坏?)" }
 
 # 可写状态目录:skill 包外,重装/升级 skill 不影响用户数据(写死,想换位置改这里)
+# 布局(多 VM):根目录放共享件(bundle/.ssh-key/mounts.example.txt/clip-daemon),
+# 每台 VM 一个子目录(<VM 名>\)放自己的 mounts.txt/features.txt/pid/渲染 yaml
 $StateDir = Join-Path $env:USERPROFILE '.cc-sandbox'
 if (-not (Test-Path $StateDir)) { New-Item -ItemType Directory -Path $StateDir -Force | Out-Null }
+if ($Name -eq 'bundle') { throw "VM 名不能用保留字: $Name" }
+$vmStateDir = Join-Path $StateDir $Name
+if (-not (Test-Path $vmStateDir)) { New-Item -ItemType Directory -Path $vmStateDir -Force | Out-Null }
+
+# 一次性迁移:多 VM 布局改造前, mounts.txt/features.txt/pid/渲染 yaml 平铺在根目录。
+# 首次跑新版本时自动挪进默认 VM(claude-dev)的子目录;bundle/.ssh-key/模板本就共享,不动
+$legacyMoved = @()
+foreach ($lf in @('mounts.txt', 'features.txt', '.tunnel.pid', '.clip-tunnel.pid', '.cloud-init.rendered.yaml')) {
+    $legacySrc = Join-Path $StateDir $lf
+    if (Test-Path $legacySrc) {
+        Move-Item $legacySrc (Join-Path (Join-Path $StateDir 'claude-dev') $lf) -Force
+        $legacyMoved += $lf
+    }
+}
+if ($legacyMoved.Count -gt 0) {
+    if (-not (Test-Path (Join-Path $StateDir 'claude-dev'))) { New-Item -ItemType Directory -Path (Join-Path $StateDir 'claude-dev') -Force | Out-Null }
+    Write-Host "    一次性迁移:旧平铺状态($($legacyMoved -join ', '))已移入 claude-dev\ 子目录(多 VM 布局)" -ForegroundColor DarkGray
+}
 
 # 状态目录常备 mounts.txt 模板(用户复制/改名为 mounts.txt 后填自己的路径;幂等,已存在不覆盖)
 $mountsExampleSrc = Join-Path $assetsDir 'mounts.example.txt'
@@ -55,9 +82,11 @@ if ((Test-Path $mountsExampleSrc) -and -not (Test-Path $mountsExampleDst)) {
 
 # -CcSwitchPort 是否被用户显式传入(未显式传时,允许从 base_url 里自动采信端口)
 $ccSwitchPortExplicit = $PSBoundParameters.ContainsKey('CcSwitchPort')
+# -Name 是否被用户显式传入(status 用:显式=单台详情,未显式且多台=总览)
+$nameExplicit = $PSBoundParameters.ContainsKey('Name')
 
 # ====== 常量(不变项) ======
-$vmName         = "claude-dev"
+$vmName         = $Name                                 # 多 VM:-Name 指定;默认 claude-dev
 $vmImage        = "noble"                               # Ubuntu 24.04 LTS(换版本改这里)
 $mountClaudeHost = "/home/ubuntu/.claude-host"          # 宿主机 ~/.claude 挂到 VM 哪里
 $mountWorkspace = "/home/ubuntu/workspace"              # ./workspace 挂到 VM 哪里(放在 ~/ 下)
@@ -113,6 +142,30 @@ $optionalFeatures = @(
         Description = '宿主机截图 → VM 里 Claude Code Ctrl+V 直接粘图(PowerShell 常驻服务 + 专享 SSH 反向隧道;multipass shell / ssh 进 VM 均可)'
         Probe       = 'grep -q cc-sandbox /usr/local/bin/xclip 2>/dev/null'
         FinishHint  = '剪贴板桥:  宿主机截图 → VM 里 claude 按 Ctrl+V 粘图(multipass shell / ssh 进 VM 均可)'
+    }
+    @{
+        Id          = 'dev-java'
+        Name        = 'Java 环境'
+        RebuildOnly = $false   # 非重建型:勾上后现有 VM 下次 start 即装(probe 过就跳过)
+        Description = '预装 JDK 17 + Maven(离线 bundle 秒装;缺件/旧 VM 回退在线 apt,几百 MB 较慢)'
+        Probe       = 'type -P java >/dev/null 2>&1 && type -P mvn >/dev/null 2>&1'
+        FinishHint  = ''
+    }
+    @{
+        Id          = 'dev-python'
+        Name        = 'Python 环境'
+        RebuildOnly = $false
+        Description = '预装 python3 + uv(离线 bundle 秒装;uv 自带 venv/包管理,不装 apt venv)'
+        Probe       = 'type -P python3 >/dev/null 2>&1 && type -P uv >/dev/null 2>&1'
+        FinishHint  = ''
+    }
+    @{
+        Id          = 'dev-frontend'
+        Name        = '前端工具链'
+        RebuildOnly = $false
+        Description = '预装 pnpm 10 系(离线 bundle 优先;10.x 兼容 Node 20,11.x 需 Node 22)'
+        Probe       = 'pnpm -v >/dev/null 2>&1'
+        FinishHint  = ''
     }
 )
 
@@ -568,7 +621,7 @@ function Render-CloudInit {
     if ($AptMirror -notmatch '^[a-zA-Z0-9.-]+(:[0-9]+)?$') { throw "-AptMirror 只能是合法 hostname,当前值: $AptMirror" }
     $rendered = $rendered.Replace('{{APT_MIRROR_PLACEHOLDER}}', $AptMirror)
 
-    $renderedPath = Join-Path $StateDir ".cloud-init.rendered.yaml"
+    $renderedPath = Join-Path $vmStateDir ".cloud-init.rendered.yaml"
     $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
     [System.IO.File]::WriteAllText($renderedPath, $rendered, $utf8NoBom)
     Write-Ok "渲染完成: $renderedPath"
@@ -612,7 +665,7 @@ function Get-TunnelDecision {
 
 # ====== 杀隧道 ======
 function Stop-Tunnel {
-    $pidFile = Join-Path $StateDir ".tunnel.pid"
+    $pidFile = Join-Path $vmStateDir ".tunnel.pid"
     if (-not (Test-Path $pidFile)) { return }
     $tpid = (Get-Content $pidFile -First 1).Trim()
     if ($tpid -and (Get-Process -Id $tpid -ErrorAction SilentlyContinue)) {
@@ -674,16 +727,19 @@ function Set-HostMountReadOnly {
     return $true
 }
 
-# ====== VM 内 Claude Code 全局记忆:宿主机 ↔ VM 路径映射(可选特性 path-map) ======
+# ====== VM 内 Claude Code 全局记忆 managed block(可选特性 path-map + 开发环境共用) ======
 # 往 VM 本地 ~/.claude/CLAUDE.md 写 managed block(<!-- cc-sandbox:begin/end --> 标记之间,
-# 每次 start 按当前挂载整块刷新,块外用户自己写的内容保留)。
-# 目的:用户在对话里贴宿主机(Windows)路径时,VM 里的 Claude Code 按表换算成挂载点路径。
-# -Mappings 传映射写块;-Remove 删块(取消勾选时用,幂等,无块时无操作)。
+# 每次 start 整块刷新,块外用户自己写的内容保留)。
+# -Mappings 写"宿主机↔VM 路径映射"节(path-map 勾选时);
+# -DevEnvs 写"预装开发环境"节(开发环境勾选且装好时);
+# 任一非空就写块;两者皆空 + -Remove 才删块(幂等,无块时无操作)。
 # 失败只警告不 throw(CLAUDE.md 写不进不影响 VM 可用性,对齐 Try-Mount 语义)
 function Set-VMClaudeMemory {
     param(
         # 每项 @{ HostPrefix=<宿主机绝对路径>; VmPath=<VM 内绝对路径> }
         [AllowEmptyCollection()] [array]$Mappings = @(),
+        # 已就绪的开发环境 id(dev-java / dev-python / dev-frontend)
+        [AllowEmptyCollection()] [string[]]$DevEnvs = @(),
         [switch]$Remove
     )
 
@@ -699,35 +755,49 @@ function Set-VMClaudeMemory {
         return
     }
 
-    # 宿主侧拼好整块 markdown,VM 端只做整块替换(避免多行/引号穿透 exec 传参)
-    $rows = ($Mappings | ForEach-Object {
-        "| ``$($_.HostPrefix)`` | ``$($_.VmPath)`` |"
-    }) -join "`n"
-    $exampleHost = "$($Mappings[0].HostPrefix)\test-project\.gitignore"
-    $exampleVm   = "$($Mappings[0].VmPath)/test-project/.gitignore"
-
-    $block = @'
-<!-- cc-sandbox:begin -->
-## 沙箱环境(cc-sandbox 自动生成,勿手改本区块)
-
-你在 Multipass Ubuntu VM(claude-dev)里运行,不是在用户的 Windows 宿主机上。
-workspace 由宿主机挂载进来,同一文件两边路径不同;用户消息里的 Windows 路径,按表换算后再操作。
-
-### 宿主机路径 ↔ VM 路径映射
-
-| 宿主机路径前缀 | VM 内路径 |
-| --- | --- |
-{{MAPPING_ROWS}}
-
-换算规则:
-
-- 命中判断忽略大小写:用户路径等于某前缀,或以"前缀 + `\`"开头,即命中该行。
-- 命中后把前缀部分替换为对应 VM 路径,余下路径的 `\` 换成 `/`。例:`{{EXAMPLE_HOST}}` → `{{EXAMPLE_VM}}`。
-- 反向同理:给用户展示文件位置时换算回宿主机路径,方便其在 Windows 侧定位。
-- 前缀不在表中的宿主机路径未挂载进 VM,无法访问,应明确告知用户。
-<!-- cc-sandbox:end -->
-'@
-    $block = $block.Replace('{{MAPPING_ROWS}}', $rows).Replace('{{EXAMPLE_HOST}}', $exampleHost).Replace('{{EXAMPLE_VM}}', $exampleVm)
+    # 宿主侧拼好整块 markdown,VM 端只做整块替换(避免多行/引号穿透 exec 传参)。
+    # 各节按需拼装:path-map 勾选 → 路径映射节;开发环境装好 → 预装环境节
+    $sections = @(
+        '<!-- cc-sandbox:begin -->'
+        '## 沙箱环境(cc-sandbox 自动生成,勿手改本区块)'
+        ''
+        '你在 Multipass Ubuntu VM(claude-dev)里运行,不是在用户的 Windows 宿主机上。'
+    )
+    if (@($Mappings).Count -gt 0) {
+        $rows = ($Mappings | ForEach-Object {
+            "| ``$($_.HostPrefix)`` | ``$($_.VmPath)`` |"
+        })
+        $exampleHost = "$($Mappings[0].HostPrefix)\test-project\.gitignore"
+        $exampleVm   = "$($Mappings[0].VmPath)/test-project/.gitignore"
+        $sections += @(
+            'workspace 由宿主机挂载进来,同一文件两边路径不同;用户消息里的 Windows 路径,按表换算后再操作。'
+            ''
+            '### 宿主机路径 ↔ VM 路径映射'
+            ''
+            '| 宿主机路径前缀 | VM 内路径 |'
+            '| --- | --- |'
+            $rows
+            ''
+            '换算规则:'
+            ''
+            '- 命中判断忽略大小写:用户路径等于某前缀,或以"前缀 + `\`"开头,即命中该行。'
+            '- 命中后把前缀部分替换为对应 VM 路径,余下路径的 `\` 换成 `/`。例:`{{EXAMPLE_HOST}}` → `{{EXAMPLE_VM}}`。'.Replace('{{EXAMPLE_HOST}}', $exampleHost).Replace('{{EXAMPLE_VM}}', $exampleVm)
+            '- 反向同理:给用户展示文件位置时换算回宿主机路径,方便其在 Windows 侧定位。'
+            '- 前缀不在表中的宿主机路径未挂载进 VM,无法访问,应明确告知用户。'
+        )
+    }
+    if (@($DevEnvs).Count -gt 0) {
+        $sections += @('', '### 预装开发环境', '')
+        foreach ($id in $DevEnvs) {
+            switch ($id) {
+                'dev-java'     { $sections += '- Java:OpenJDK 17 + Maven(`java -version` / `mvn -v` 可用;依赖拉取已配阿里云镜像)' }
+                'dev-python'   { $sections += '- Python:系统 python3;`uv` 在 /usr/local/bin(`uv init` 建项目、`uv add <pkg>` 加依赖、`uv venv` 建虚拟环境)' }
+                'dev-frontend' { $sections += '- 前端:Node 20(基础件)+ `pnpm` 全局可用' }
+            }
+        }
+    }
+    $sections += '<!-- cc-sandbox:end -->'
+    $block = $sections -join "`n"
 
     # 块文件经 transfer 传入(避免引号/换行穿透 exec 参数),UTF-8 无 BOM
     $blockHost = Join-Path $env:TEMP "cc-sandbox-claude-block.md"
@@ -748,13 +818,16 @@ workspace 由宿主机挂载进来,同一文件两边路径不同;用户消息�
         Write-Warn "路径映射块写入 ~/.claude/CLAUDE.md 失败:$err"
         return
     }
-    Write-Ok "已写入宿主机↔VM 路径映射到 VM ~/.claude/CLAUDE.md($($Mappings.Count) 条)"
+    $desc = @()
+    if (@($Mappings).Count -gt 0) { $desc += "路径映射 $($Mappings.Count) 条" }
+    if (@($DevEnvs).Count -gt 0) { $desc += "开发环境 $($DevEnvs.Count) 项" }
+    Write-Ok "已写入 VM ~/.claude/CLAUDE.md 记忆块($($desc -join ';'))"
 }
 
 # ====== mounts.txt:读取 ======
 # 返回 string[];配置文件不存在/为空 → 返回空数组(调用方跳过)
 function Get-MountEntries {
-    $cfg = Join-Path $StateDir "mounts.txt"
+    $cfg = Join-Path $vmStateDir "mounts.txt"
     if (-not (Test-Path $cfg)) { return @() }
     if (-not (Test-Path $cfg -PathType Leaf)) { throw "mounts.txt 不是普通文件: $cfg" }
     try {
@@ -888,7 +961,7 @@ function Mount-WorkspaceSubdirs {
 
 # 读 features.txt(无文件/空 → 空列表);未知 id 忽略并提示(版本升降级/手误的向前兼容)
 function Get-SavedFeatureIds {
-    $cfg = Join-Path $StateDir "features.txt"
+    $cfg = Join-Path $vmStateDir "features.txt"
     if (-not (Test-Path $cfg -PathType Leaf)) { return @() }
     $known = @($optionalFeatures | ForEach-Object { $_.Id })
     $ids = @()
@@ -907,7 +980,7 @@ function Get-SavedFeatureIds {
 function Set-SavedFeatureIds {
     # AllowEmptyCollection:全不选(菜单 n)时写回空列表,Mandatory 默认会拒空数组(实测 2026-08-17)
     param([Parameter(Mandatory)] [AllowEmptyCollection()] [string[]]$Ids)
-    $cfg = Join-Path $StateDir "features.txt"
+    $cfg = Join-Path $vmStateDir "features.txt"
     $lines = @(
         "# 可选特性选择:launch.ps1 start 交互菜单会自动改写此文件"
         "# 每行一个特性 id;删掉某行即关闭该特性(重建型特性需 delete + start 重建才生效)"
@@ -993,6 +1066,7 @@ function Confirm-RebuildForFeatures {
 
 # bundle 传输 + 离线安装(基础 cloud-init 完成后调用)
 function Invoke-BundlePhase {
+    param([AllowEmptyCollection()] [string[]]$EnabledFeatures = @())
     # 基础 cloud-init 完成后再传 bundle:bundle 是 ~220MB 只读 tarball,不需要"实时挂载"。
     # multipass mount 走 multipass-sshfs,新 VM 上 daemon 首次推 sshfs 二进制经常超 180s
     # (实测 2026-08-12:cloud-init done、daemon 健康、mount 180s 仍未完成)。
@@ -1032,7 +1106,10 @@ function Invoke-BundlePhase {
         if (-not (Test-Path $installScriptHost)) { throw "缺少 bundle 安装脚本:$installScriptHost" }
         $transfer = Invoke-Multipass -ArgumentList @('transfer', $installScriptHost, "${vmName}:/tmp/install-bundle.sh") -TimeoutSec 30
         if ($transfer.TimedOut -or $transfer.ExitCode -ne 0) { throw "bundle 安装脚本传入 VM 失败。$($transfer.Stderr)" }
-        $install = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'sudo', 'bash', '/tmp/install-bundle.sh') -TimeoutSec 600
+        # 可选开发环境按勾选传 --dev-* 标志:单词参数,不受 exec 传参拆词影响;
+        # bundle 里缺对应文件时脚本自行跳过,后面 Start-DevEnvs 在线兜底
+        $devFlags = @($EnabledFeatures | Where-Object { $_ -like 'dev-*' } | ForEach-Object { "--$_" })
+        $install = Invoke-Multipass -ArgumentList (@('exec', $vmName, '--', 'sudo', 'bash', '/tmp/install-bundle.sh') + $devFlags) -TimeoutSec 600
         if ($install.TimedOut -or $install.ExitCode -ne 0) { throw "bundle 本地安装失败，停止启动。$($install.Stderr)" }
         Write-Ok "Node.js、Claude Code、cc-pocket 本地安装完成"
     }
@@ -1044,7 +1121,9 @@ function Invoke-BundlePhase {
 function Invoke-MountPhase {
     param(
         [Parameter(Mandatory)] [array]$Mounts,
-        [Parameter(Mandatory)] [AllowEmptyCollection()] [string[]]$EnabledFeatures
+        [Parameter(Mandatory)] [AllowEmptyCollection()] [string[]]$EnabledFeatures,
+        # 已就绪的开发环境 id(Start-DevEnvs 产出),写进 VM 记忆块
+        [AllowEmptyCollection()] [string[]]$DevEnvs = @()
     )
     Write-Step "挂载宿主机 ~/.claude → VM $mountClaudeHost..."
     $hostClaude = Join-Path $env:USERPROFILE ".claude"
@@ -1079,13 +1158,17 @@ function Invoke-MountPhase {
         throw "一个或多个额外挂载失败,停止启动以避免 workspace 数据位置不确定"
     }
 
-    # 可选特性 path-map(非重建型,现有 VM 立即生效):挂载已定,按实际映射生成说明块
-    if ($EnabledFeatures -contains 'path-map') {
-        # 映射恒非空:开头已 fail-fast 保证 mounts.txt 至少一项
-        $pathMappings = foreach ($m in $Mounts) { @{ HostPrefix = $m.HostPath; VmPath = $m.Target } }
-        Set-VMClaudeMemory -Mappings @($pathMappings)
+    # VM 记忆块(可选特性 path-map + 开发环境共用,非重建型,现有 VM 立即生效):
+    # 挂载已定,按实际映射 + 实际装好的环境生成;任一启用就写块,都不启用才移除
+    # (幂等,无块时无操作;块外用户自己写的内容不动)
+    $useBlock = ($EnabledFeatures -contains 'path-map') -or (@($DevEnvs).Count -gt 0)
+    if ($useBlock) {
+        $pathMappings = if ($EnabledFeatures -contains 'path-map') {
+            # 映射恒非空:开头已 fail-fast 保证 mounts.txt 至少一项
+            foreach ($m in $Mounts) { @{ HostPrefix = $m.HostPath; VmPath = $m.Target } }
+        } else { @() }
+        Set-VMClaudeMemory -Mappings @($pathMappings) -DevEnvs @($DevEnvs)
     } else {
-        # 取消勾选时移除旧块,VM 内状态与勾选保持一致(幂等,无块时无操作)
         Set-VMClaudeMemory -Remove
     }
 }
@@ -1148,9 +1231,51 @@ function Stop-PidFileProcess {
     Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
 }
 
+function Stop-ClipTunnel {
+    Stop-PidFileProcess -PidFile (Join-Path $vmStateDir '.clip-tunnel.pid') -Label "剪贴板桥隧道($vmName)"
+}
+
+# daemon 是全局单例(多台 VM 的 ssh -R 都转回它):仅当没有其他受管 VM 正跑且开着
+# clip-bridge 时才停;查不清 multipass 状态时保守不停(留着无害,start 会复用)
+function Stop-ClipDaemonIfUnused {
+    $r = Invoke-Multipass -ArgumentList @('list', '--format', 'csv') -TimeoutSec 15
+    if ($r.ExitCode -ne 0) { return }
+    $lines = @($r.Stdout -split "`r?`n")
+    foreach ($dir in (Get-ChildItem $StateDir -Directory -ErrorAction SilentlyContinue)) {
+        if ($dir.Name -eq $vmName -or $dir.Name -eq 'bundle') { continue }
+        $feat = Join-Path $dir.FullName 'features.txt'
+        if (-not (Test-Path $feat)) { continue }
+        $ids = @(Get-Content $feat -ErrorAction SilentlyContinue | ForEach-Object { $_.Trim() } |
+            Where-Object { $_ -ne '' -and -not $_.StartsWith('#') })
+        if ($ids -notcontains 'clip-bridge') { continue }
+        $line = $lines | Where-Object { $_ -like "$($dir.Name),*" } | Select-Object -First 1
+        if ($line -and (($line -split ',')[1] -eq 'Running')) { return }   # 还有别的 VM 在用
+    }
+    # 停:以端口监听者为准(pid 文件可能过期——孤儿 daemon 不在里面也逃不掉);
+    # 确认监听者确是本 skill 的 host-daemon.ps1 才杀,避免误伤碰巧占用端口的其他程序
+    $listenerPid = Get-ClipDaemonListenerPid
+    if ($listenerPid) {
+        $wmi = Get-CimInstance Win32_Process -Filter "ProcessId=$listenerPid" -ErrorAction SilentlyContinue
+        if ($wmi -and $wmi.CommandLine -match 'host-daemon\.ps1') {
+            Stop-Process -Id $listenerPid -Force
+            Write-Ok "剪贴板桥 daemon 已停(PID $listenerPid)"
+        }
+    }
+    Remove-Item (Join-Path $StateDir '.clip-daemon.pid') -Force -ErrorAction SilentlyContinue
+}
+
+# daemon 的真实身份是端口上的监听进程;pid 文件只是缓存,可能过期或被半途失败的
+# 新 daemon 覆盖。返回监听进程 PID(int),拿不到返回 0
+function Get-ClipDaemonListenerPid {
+    $c = Get-NetTCPConnection -LocalPort $clipBridgePort -State Listen -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($c) { return [int]$c.OwningProcess }
+    return 0
+}
+
 function Stop-ClipBridge {
-    Stop-PidFileProcess -PidFile (Join-Path $StateDir '.clip-tunnel.pid') -Label '剪贴板桥隧道'
-    Stop-PidFileProcess -PidFile (Join-Path $StateDir '.clip-daemon.pid') -Label '剪贴板桥 daemon'
+    Stop-ClipTunnel
+    Stop-ClipDaemonIfUnused
 }
 
 # 勾选着 clip-bridge 的每次 start 全量执行(幂等,重装垫片自愈);失败只 warn 不阻塞
@@ -1158,9 +1283,12 @@ function Stop-ClipBridge {
 function Start-ClipBridge {
     param([Parameter(Mandatory)] [AllowEmptyCollection()] [string[]]$EnabledFeatures)
 
-    # 幂等:先停旧 daemon/隧道,下面按需重起
-    Stop-ClipBridge
-    if ($EnabledFeatures -notcontains 'clip-bridge') { return }
+    # 幂等:先停本 VM 的旧隧道(daemon 全局共享,可能别的 VM 还在用,交给引用计数判断)
+    Stop-ClipTunnel
+    if ($EnabledFeatures -notcontains 'clip-bridge') {
+        Stop-ClipDaemonIfUnused
+        return
+    }
 
     $bridgeDir   = Join-Path $scriptDir 'clip-bridge'
     $daemonScript = Join-Path $bridgeDir 'host-daemon.ps1'
@@ -1170,18 +1298,35 @@ function Start-ClipBridge {
         if (-not (Test-Path $p)) { Write-Warn "剪贴板桥缺文件 $p,本次跳过"; return }
     }
 
-    # 1) 宿主 daemon(隐藏窗口常驻;秒退只 warn,后续端到端检查会如实报告)
-    Write-Step "启动剪贴板桥 daemon(127.0.0.1:$clipBridgePort)..."
+    # 1) 宿主 daemon(全局单例:活着就直接复用——多 VM 场景第二台不再起新进程)。
+    #    判活以 /health 端口探测为准;pid 文件只作记录,探通时用端口 owner 纠偏回写
     $daemonPidFile = Join-Path $StateDir '.clip-daemon.pid'
-    $daemonProc = Start-Process -FilePath 'powershell.exe' `
-        -ArgumentList (Join-ProcessArguments @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $daemonScript, '-Port', "$clipBridgePort")) `
-        -WindowStyle Hidden -PassThru
-    $daemonProc.Id | Out-File $daemonPidFile -Encoding ascii -Force
-    Start-Sleep -Milliseconds 1500
-    if ($daemonProc.HasExited) {
-        Write-Warn "剪贴板桥 daemon 秒退(ExitCode=$($daemonProc.ExitCode),端口被占?)。日志: $StateDir\clip-daemon.log"
+    $null = & curl.exe -s --max-time 3 "http://127.0.0.1:$clipBridgePort/health" 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        $listenerPid = Get-ClipDaemonListenerPid
+        if ($listenerPid) { "$listenerPid" | Out-File $daemonPidFile -Encoding ascii -Force }
+        Write-Ok "剪贴板桥 daemon 复用(全局共享,PID $listenerPid)"
     } else {
-        Write-Ok "daemon PID $($daemonProc.Id)"
+        Write-Step "启动剪贴板桥 daemon(127.0.0.1:$clipBridgePort)..."
+        $daemonProc = Start-Process -FilePath 'powershell.exe' `
+            -ArgumentList (Join-ProcessArguments @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $daemonScript, '-Port', "$clipBridgePort")) `
+            -WindowStyle Hidden -PassThru
+        $daemonProc.Id | Out-File $daemonPidFile -Encoding ascii -Force
+        Start-Sleep -Milliseconds 1500
+        if ($daemonProc.HasExited) {
+            # 复探一次:秒退的常见原因就是撞上了判活环节没探到的既有 daemon(孤儿进程占着端口);
+            # 探通就按复用收场并用端口 owner 纠偏 pid 文件,不再报错
+            $null = & curl.exe -s --max-time 3 "http://127.0.0.1:$clipBridgePort/health" 2>$null
+            if ($LASTEXITCODE -eq 0) {
+                $listenerPid = Get-ClipDaemonListenerPid
+                if ($listenerPid) { "$listenerPid" | Out-File $daemonPidFile -Encoding ascii -Force }
+                Write-Ok "剪贴板桥 daemon 复用(既有进程 PID $listenerPid;新起进程因端口占用退出,pid 文件已纠偏)"
+            } else {
+                Write-Warn "剪贴板桥 daemon 秒退(ExitCode=$($daemonProc.ExitCode))。日志: $StateDir\clip-daemon.log"
+            }
+        } else {
+            Write-Ok "daemon PID $($daemonProc.Id)"
+        }
     }
 
     # 2) VM 垫片:transfer + sudo install(每次覆盖;装 /usr/local/bin,PATH 恒优先于 /usr/bin,
@@ -1195,12 +1340,19 @@ function Start-ClipBridge {
             return
         }
     }
-    $installShims = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'sudo', 'bash', '-c',
-        "install -m 0755 /tmp/cc-sandbox-xclip /usr/local/bin/xclip && install -m 0755 /tmp/cc-sandbox-wl-paste /usr/local/bin/wl-paste && rm -f /tmp/cc-sandbox-xclip /tmp/cc-sandbox-wl-paste") -TimeoutSec 30
-    if ($installShims.TimedOut -or $installShims.ExitCode -ne 0) {
-        $err = if ($installShims.TimedOut) { "超时" } elseif ($installShims.Stderr) { $installShims.Stderr.Trim() } else { "(无 stderr)" }
-        Write-Warn "VM 垫片安装失败:$err(剪贴板桥本次不可用,其余不受影响)"
-        return
+    # install/rm 逐条"单参数"执行:实测 sudo bash -c "带空格内联串"经 multipass exec 转发
+    # 会被拆词重解析(install 收到零操作数报 missing file operand);每词单独传参则无串可拆
+    foreach ($op in @(
+        @('install', '-m', '0755', '/tmp/cc-sandbox-xclip',    '/usr/local/bin/xclip'),
+        @('install', '-m', '0755', '/tmp/cc-sandbox-wl-paste', '/usr/local/bin/wl-paste'),
+        @('rm', '-f', '/tmp/cc-sandbox-xclip', '/tmp/cc-sandbox-wl-paste')
+    )) {
+        $r = Invoke-Multipass -ArgumentList (@('exec', $vmName, '--', 'sudo') + $op) -TimeoutSec 30
+        if ($r.TimedOut -or $r.ExitCode -ne 0) {
+            $err = if ($r.TimedOut) { "超时" } elseif ($r.Stderr) { $r.Stderr.Trim() } else { "(无 stderr)" }
+            Write-Warn "VM 垫片安装失败:$err(剪贴板桥本次不可用,其余不受影响)"
+            return
+        }
     }
     Write-Ok "垫片已装(/usr/local/bin/xclip、wl-paste)"
 
@@ -1224,7 +1376,7 @@ function Start-ClipBridge {
         Write-Warn "剪贴板桥隧道秒退,ExitCode=$($clipTunnelProc.ExitCode)(重跑 start 可自愈)"
         return
     }
-    $clipTunnelProc.Id | Out-File (Join-Path $StateDir '.clip-tunnel.pid') -Encoding ascii -Force
+    $clipTunnelProc.Id | Out-File (Join-Path $vmStateDir '.clip-tunnel.pid') -Encoding ascii -Force
     Write-Ok "桥隧道 PID $($clipTunnelProc.Id)"
 
     # 4) 端到端验证(短重试,容忍隧道建立延迟)
@@ -1242,6 +1394,133 @@ function Start-ClipBridge {
     }
 }
 
+# ====== 开发环境(可选特性 dev-java / dev-python / dev-frontend,非重建型)======
+# 勾上后每次 start:先 probe(装过跳过),缺则装;失败只 warn 不阻塞(环境是增强不是依赖)。
+# java/maven 走 apt(cloud-init 已配镜像),Maven 再幂等配阿里云镜像(国内拉依赖必需);
+# uv 用 pip 清华源装到 /usr/local/bin(Ubuntu 24.04 PEP 668 需 --break-system-packages,
+# 沙箱 VM 可接受);pnpm 走 npm 全局。
+# 返回:本次确认就绪的环境 id 列表(传给挂载阶段,一并写进 VM 记忆块)。
+function Start-DevEnvs {
+    param([Parameter(Mandatory)] [AllowEmptyCollection()] [string[]]$EnabledFeatures)
+
+    # apt 索引惰性刷新:首个要装 apt 包的环境前刷一次(全新 VM cloud-init 刷过,通常很快)
+    if (-not $script:devAptUpdated) { $script:devAptUpdated = $false }
+    function Update-AptIfNeeded {
+        if ($script:devAptUpdated) { return $true }
+        Write-Step '刷新 apt 索引...'
+        $r = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'sudo', 'apt-get', 'update') -TimeoutSec 300
+        if ($r.TimedOut -or $r.ExitCode -ne 0) {
+            $err = if ($r.TimedOut) { '超时' } elseif ($r.Stderr) { $r.Stderr.Trim() } else { '(无 stderr)' }
+            Write-Warn "apt-get update 失败:$err(继续尝试直接安装)"
+            return $false
+        }
+        $script:devAptUpdated = $true
+        return $true
+    }
+
+    function Test-DevProbe([string]$Probe) { (Test-FeatureInVm -Probe $Probe) -eq $true }
+
+    function Invoke-DevInstall([string[]]$InstallArgs, [int]$TimeoutSec, [string]$Desc) {
+        $r = Invoke-Multipass -ArgumentList (@('exec', $vmName, '--') + $InstallArgs) -TimeoutSec $TimeoutSec
+        if ($r.TimedOut -or $r.ExitCode -ne 0) {
+            $err = if ($r.TimedOut) { '超时' } elseif ($r.Stderr) { $r.Stderr.Trim() } else { '(无 stderr)' }
+            Write-Warn "$Desc 失败:$err(重跑 start 自愈;不影响其余步骤)"
+            return $false
+        }
+        return $true
+    }
+
+    $ready = @()
+
+    # Java:OpenJDK 17 + Maven + 阿里云镜像
+    if ($EnabledFeatures -contains 'dev-java') {
+        if (Test-DevProbe 'type -P java >/dev/null 2>&1 && type -P mvn >/dev/null 2>&1') {
+            Write-Ok 'Java 环境已在(OpenJDK + Maven)'
+            $ready += 'dev-java'
+        } else {
+            Write-Step '安装 Java 环境(在线兜底:OpenJDK 17 + Maven,几百 MB 首次较慢)...'
+            [void](Update-AptIfNeeded)
+            if (Invoke-DevInstall -InstallArgs @('sudo', 'apt-get', 'install', '-y', 'openjdk-17-jdk', 'maven') -TimeoutSec 1500 -Desc 'Java 安装') {
+                Write-Ok 'Java 环境装好(java / mvn)'
+                $ready += 'dev-java'
+            }
+        }
+        # Maven 阿里云镜像(国内拉依赖必需;幂等:已有 settings.xml 不覆盖)
+        if ((Test-FeatureInVm -Probe 'test -f ~/.m2/settings.xml') -ne $true) {
+            $mavenSettings = @'
+<?xml version="1.0" encoding="UTF-8"?>
+<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0">
+  <mirrors>
+    <mirror>
+      <id>aliyun-public</id>
+      <name>Aliyun Public (central + jcenter)</name>
+      <url>https://maven.aliyun.com/repository/public</url>
+      <mirrorOf>central</mirrorOf>
+    </mirror>
+  </mirrors>
+</settings>
+'@
+            $settingsHost = Join-Path $env:TEMP 'cc-sandbox-maven-settings.xml'
+            $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+            [System.IO.File]::WriteAllText($settingsHost, $mavenSettings, $utf8NoBom)
+            $t = Invoke-Multipass -ArgumentList @('transfer', $settingsHost, "${vmName}:/tmp/cc-maven-settings.xml") -TimeoutSec 30
+            if ($t.TimedOut -or $t.ExitCode -ne 0) {
+                Write-Warn 'Maven 镜像配置传入 VM 失败(依赖下载会走默认源,慢)'
+            } else {
+                $m = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'bash', '-c',
+                    'mkdir -p ~/.m2 && mv /tmp/cc-maven-settings.xml ~/.m2/settings.xml') -TimeoutSec 30
+                if ($m.TimedOut -or $m.ExitCode -ne 0) {
+                    Write-Warn 'Maven 镜像配置写入失败(依赖下载会走默认源,慢)'
+                } else {
+                    Write-Ok 'Maven 已配阿里云镜像(~/.m2/settings.xml)'
+                }
+            }
+        }
+    }
+
+    # Python:python3(基础镜像自带)+ uv;venv/包管理全走 uv,不依赖 apt 的 python3-venv。
+    # bundle 离线装好的话这里的探测直接通过;走到安装分支 = 在线兜底(bundle 无 uv 或 VM 已存在)
+    if ($EnabledFeatures -contains 'dev-python') {
+        if (Test-DevProbe 'type -P python3 >/dev/null 2>&1 && type -P uv >/dev/null 2>&1') {
+            Write-Ok 'Python 环境已在(python3 + uv)'
+            $ready += 'dev-python'
+        } else {
+            Write-Step '安装 Python 环境(在线兜底:python3 + venv + pip)...'
+            [void](Update-AptIfNeeded)
+            if (Invoke-DevInstall -InstallArgs @('sudo', 'apt-get', 'install', '-y', 'python3', 'python3-venv', 'python3-pip') -TimeoutSec 600 -Desc 'Python 基础包安装') {
+                Write-Step '安装 uv(pip 清华镜像)...'
+                if (Invoke-DevInstall -InstallArgs @('sudo', 'pip3', 'install', '--break-system-packages', '-i', 'https://pypi.tuna.tsinghua.edu.cn/simple', 'uv') -TimeoutSec 300 -Desc 'uv 安装') {
+                    Write-Ok 'Python 环境装好(python3 + venv + uv)'
+                    $ready += 'dev-python'
+                }
+            }
+        }
+    }
+
+    # 前端:pnpm 10 系(Node 已是基础件;pnpm 11.x 需 Node≥22 与 VM 的 Node 20 不兼容)
+    if ($EnabledFeatures -contains 'dev-frontend') {
+        # 探测用 pnpm -v 而非 type -P:文件在但跑不起来(如误装 11.x)也算未装
+        if (Test-DevProbe 'pnpm -v >/dev/null 2>&1') {
+            Write-Ok '前端工具链已在(pnpm)'
+            $ready += 'dev-frontend'
+        } else {
+            Write-Step '安装 pnpm(在线兜底:npm 全局,钉 10 系兼容 Node 20)...'
+            if (Invoke-DevInstall -InstallArgs @('sudo', 'npm', 'install', '-g', 'pnpm@10') -TimeoutSec 300 -Desc 'pnpm 安装') {
+                # npm 退出码 0 不代表 pnpm 能跑(版本不兼容时会装上但崩),复跑探测确认
+                if (Test-DevProbe 'pnpm -v >/dev/null 2>&1') {
+                    Write-Ok '前端工具链装好(pnpm)'
+                    $ready += 'dev-frontend'
+                } else {
+                    Write-Warn 'pnpm 已装但跑不起来(Node/pnpm 版本不兼容?重跑 start 换版本)'
+                }
+            } else {
+                Write-Warn 'npm 源不通时可在 VM 里换镜像后重跑 start:sudo npm config -g set registry https://registry.npmmirror.com'
+            }
+        }
+    }
+    return ,@($ready)
+}
+
 # ====== start ======
 function Start-ClaudeDev {
     Assert-Prerequisites
@@ -1253,7 +1532,7 @@ function Start-ClaudeDev {
     # mounts.txt 缺失/为空属配置不完整:VM workspace 会是本地空目录,
     # path-map 也无映射可写(勾选了却不生效),启动前拦下
     if ($mounts.Count -eq 0) {
-        throw "start 需要 mounts.txt 配置挂载:$StateDir\mounts.txt 不存在或为空。把 $StateDir\mounts.example.txt 复制为 mounts.txt,填入宿主目录(每行一个)后重跑"
+        throw "start 需要 mounts.txt 配置挂载:$vmStateDir\mounts.txt 不存在或为空。把 $StateDir\mounts.example.txt 复制为 $vmStateDir\mounts.txt,填入宿主目录(每行一个)后重跑"
     }
 
     # 可选特性:交互菜单(真人终端)> features.txt;选择统一写回 features.txt(重建后不丢)
@@ -1267,7 +1546,7 @@ function Start-ClaudeDev {
 
     # 隧道复用/清理:start 幂等可反复跑。停旧隧道(后面会重起)
     Stop-Tunnel
-    $pidFile = Join-Path $StateDir ".tunnel.pid"
+    $pidFile = Join-Path $vmStateDir ".tunnel.pid"
 
     # SSH keypair
     $keyPath = Join-Path $StateDir ".ssh-key"
@@ -1349,9 +1628,10 @@ function Start-ClaudeDev {
         Write-Warn "cloud-init 结束状态: error(常见是 APT 镜像不可达、基础包装失败)。若后续 bundle 安装报错,先查 'multipass exec $vmName -- cloud-init status --long' 和 /var/log/cloud-init-output.log"
     }
 
-    # 三阶段:bundle 传输安装 → 挂载 → 隧道(子函数见上,失败各自 throw)
-    Invoke-BundlePhase
-    Invoke-MountPhase -Mounts $mounts -EnabledFeatures $enabledFeatures
+    # 四阶段:bundle 传输安装 → 开发环境 → 挂载(含记忆块)→ 隧道(子函数见上,失败各自处理)
+    Invoke-BundlePhase -EnabledFeatures $enabledFeatures
+    $devEnvs = Start-DevEnvs -EnabledFeatures $enabledFeatures
+    Invoke-MountPhase -Mounts $mounts -EnabledFeatures $enabledFeatures -DevEnvs $devEnvs
     Start-TunnelIfNeeded
     Start-ClipBridge -EnabledFeatures $enabledFeatures
 
@@ -1384,7 +1664,45 @@ function Stop-ClaudeDev {
 }
 
 # ====== status ======
+# 全部受管 VM 总览:状态目录的子目录(除 bundle)= 受管名单,与 multipass list 求交集
+function Show-VmsOverview {
+    Write-Step "受管 VM 总览(状态目录 $StateDir\<VM 名>)"
+    $r = Invoke-Multipass -ArgumentList @('list', '--format', 'csv') -TimeoutSec 15
+    if ($r.ExitCode -ne 0) {
+        Write-Warn "multipass list 失败,无法总览(见 troubleshooting §F)"
+        return
+    }
+    $lines = @($r.Stdout -split "`r?`n" | Where-Object { $_ })
+    $dirs = @(Get-ChildItem $StateDir -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -ne 'bundle' } | Sort-Object Name)
+    foreach ($d in $dirs) {
+        $line = $lines | Where-Object { $_ -like "$($d.Name),*" } | Select-Object -First 1
+        if (-not $line) {
+            Write-Warn "$($d.Name):multipass 里不存在(状态目录残留,可 delete 清理)"
+            continue
+        }
+        $cols = $line -split ','
+        $feat = Join-Path $d.FullName 'features.txt'
+        $featNames = ''
+        if (Test-Path $feat) {
+            $featNames = (@(Get-Content $feat -ErrorAction SilentlyContinue | ForEach-Object { $_.Trim() } |
+                Where-Object { $_ -ne '' -and -not $_.StartsWith('#') }) -join ',')
+        }
+        Write-Host ("    {0}{1}{2}特性: {3}" -f $d.Name.PadRight(16), $cols[1].PadRight(10), "$($cols[2])".PadRight(17), $featNames)
+    }
+}
+
 function Show-Status {
+    # 无 -Name 且受管 VM 多于一台:给总览(单台详情用 status -Name <名字>)
+    if (-not $nameExplicit) {
+        $dirs = @(Get-ChildItem $StateDir -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -ne 'bundle' })
+        if ($dirs.Count -gt 1) {
+            Show-VmsOverview
+            Write-Host "    单台详情:.\scripts\launch.ps1 status -Name <名字>" -ForegroundColor DarkGray
+            return
+        }
+    }
     Write-Step "VM 状态"
     # Test-VmExists 失败会 throw(fail-fast,报 §F),不会误报"VM 不存在"掩盖 daemon 问题。
     # status 只读,这里不 try/catch,让 throw 直接作为健康信号上抛。
@@ -1399,7 +1717,7 @@ function Show-Status {
     if ($tunnel.Mode -eq 'direct') {
         Write-Ok "未启用(直连模式:$($tunnel.Reason))"
     } else {
-        $pidFile = Join-Path $StateDir ".tunnel.pid"
+        $pidFile = Join-Path $vmStateDir ".tunnel.pid"
         if (Test-Path $pidFile) {
             $tpid = (Get-Content $pidFile -First 1).Trim()
             $p = Get-Process -Id $tpid -ErrorAction SilentlyContinue
@@ -1428,7 +1746,7 @@ function Show-Status {
         if ($clipDaemonOk) { Write-Ok "宿主 daemon 在跑(PID $clipDaemonPid,/health ok)" }
         else { Write-Warn "宿主 daemon 未响应(重跑 start 自愈;日志 $StateDir\clip-daemon.log)" }
 
-        $clipTunnelPidFile = Join-Path $StateDir '.clip-tunnel.pid'
+        $clipTunnelPidFile = Join-Path $vmStateDir '.clip-tunnel.pid'
         if (Test-Path $clipTunnelPidFile) {
             $clipTunnelPid = (Get-Content $clipTunnelPidFile -First 1).Trim()
             if ($clipTunnelPid -and (Get-Process -Id $clipTunnelPid -ErrorAction SilentlyContinue)) {
@@ -1450,6 +1768,23 @@ function Show-Status {
         }
     } else {
         Write-Host "    未启用(features.txt 无 clip-bridge)" -ForegroundColor DarkGray
+    }
+
+    Write-Step "开发环境"
+    $devEnabledIds = @($optionalFeatures | Where-Object { $_.Id -like 'dev-*' -and (Get-SavedFeatureIds) -contains $_.Id } | ForEach-Object { $_.Id })
+    if ($devEnabledIds.Count -eq 0) {
+        Write-Host "    未启用(features.txt 无 dev-java/dev-python/dev-frontend)" -ForegroundColor DarkGray
+    } elseif ((Get-VmState) -eq 'Running') {
+        foreach ($id in $devEnabledIds) {
+            $f = $optionalFeatures | Where-Object { $_.Id -eq $id }
+            $probe = Test-FeatureInVm -Probe $f.Probe
+            if ($probe -eq $true) { Write-Ok "$($f.Name) 已装" }
+            elseif ($probe -eq $false) { Write-Warn "$($f.Name) 勾选了但未装上(重跑 start 安装)" }
+            else { Write-Warn "$($f.Name) 探测超时" }
+        }
+    } else {
+        $names = ($optionalFeatures | Where-Object { $devEnabledIds -contains $_.Id } | ForEach-Object { $_.Name }) -join ', '
+        Write-Host "    VM 未运行,跳过探测(已启用:$names)" -ForegroundColor DarkGray
     }
 
     Write-Step "可选特性"
@@ -1497,7 +1832,7 @@ function Delete-ClaudeDev {
     Write-Step "删 VM..."
     Invoke-VmActionGraceful -MultipassArgs @('delete', '--purge', $vmName) -DoneMsg "VM 已删除并清理"
     Write-Host ""
-    Write-Host "保留: 状态目录($StateDir)里的 mounts.txt、features.txt、bundle、.ssh-key(下次 start 复用)" -ForegroundColor Green
+    Write-Host "保留: 共享件($StateDir 根:bundle、.ssh-key)+ 该 VM 配置(${vmStateDir}:mounts.txt、features.txt,下次 start 复用)" -ForegroundColor Green
 }
 
 # ====== 路由 ======

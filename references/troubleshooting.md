@@ -4,7 +4,8 @@
 
 - Multipass:推荐/实测 **1.14.1**,勿升 1.16.x(其 daemon 在 Windows 不稳,list/launch 会卡死或超时)。
 - OpenSSH 客户端:Windows 10+ 通常自带(`ssh -V` 验证);缺则 设置 → 应用 → 可选功能 → 添加 OpenSSH 客户端。
-- 可写状态(mounts.txt、.ssh-key、.tunnel.pid、bundle、workspace)都在状态目录,默认 `%USERPROFILE%\.cc-sandbox\`。
+- 可写状态在状态目录 `%USERPROFILE%\.cc-sandbox\`:根目录是共享件(bundle、.ssh-key、mounts.example.txt、剪贴板桥 daemon 的 pid/log);每台 VM 一个子目录(`<VM名>\mounts.txt、features.txt、.tunnel.pid、.clip-tunnel.pid、.cloud-init.rendered.yaml`)。多 VM 用 `-Name` 起和管理。
+- **第二台 VM 起不来**(`multipass launch failed:` 空错误,Windows 事件日志 Application 源 multipass 有 `Start-VM ... 0x800705AA 无法分配 RAM`):宿主机内存不够,不是脚本/daemon 问题。先 `stop` 现有 VM 或换小配置(如 `-MemoryGB 4 -Cpus 2 -DiskGB 8`),或关掉宿主机大内存应用。每台 VM 默认吃 8G/30G,多开前算好家底(C 盘也要给 VM 磁盘留余量)。
 
 ## VM 里 Claude Code 报连不上 LLM / cc-switch
 

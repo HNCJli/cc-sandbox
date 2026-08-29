@@ -1,8 +1,9 @@
 # 可选特性交互菜单:方向键 TUI 多选 + 编号输入降级。由 launch.ps1 dot-source。
-# 与 progress.ps1 同模式:函数在调用时才读 launch.ps1 作用域里的 $optionalFeatures /
+# 与 progress.ps1 同模式:函数在调用时才读调用方作用域里的 $optionalFeatures /
 # $StateDir / Write-Step / Write-Warn(动态作用域),本文件不定义这些。
 # 内容:Test-InteractiveConsole / Test-TuiConsole / ConvertTo-FeatureSelection /
-#       Get-DisplayWidth / Wrap-FeatureText / Show-FeatureMenuTui / Select-OptionalFeatures
+#       Get-DisplayWidth / Wrap-FeatureText / Show-FeatureMenuTui / Select-OptionalFeatures /
+#       Show-SingleChoiceMenuTui / Select-SingleChoice(单选,prepare-bundle 版本选择用)
 
 # stdin 是真人终端才弹菜单:Claude 后台跑/管道/重定向 stdin 时自动跳过,避免无人应答卡死
 function Test-InteractiveConsole {
@@ -113,12 +114,20 @@ function Show-FeatureMenuTui {
 
     $title = "可选特性(空格勾选;重建型特性需 delete + start 才生效)"
     $hint1 = "↑↓ 移动   空格 勾选/取消   回车 确认   a=全选   n=全不选"
-    $hint2 = "选择保存到 $StateDir\features.txt,下次 start 自动沿用"
-    $menuTop = [Console]::CursorTop
+    $hint2 = "选择保存到 $vmStateDir\features.txt,下次 start 自动沿用"
+    # 预留整块高度:光标离缓冲区底不足时先滚出空间。否则 Draw 逐行写会触发滚动,
+    # menuTop 随之失效 → 重绘错位/字符重叠(2026-08-29 Warp 实测),菜单越画越乱
+    if ([Console]::BufferHeight - [Console]::CursorTop - 1 -lt $blockH) {
+        [Console]::Write(("`n" * ($blockH - ([Console]::BufferHeight - [Console]::CursorTop - 1))))
+        $menuTop = [Console]::CursorTop - $blockH + 1
+    } else {
+        $menuTop = [Console]::CursorTop
+    }
 
     # 整块重绘:光标回到块首逐行重写,行尾补空格到窗口宽清残影(嵌套函数按动态作用域读外层变量)
+    # 钳到缓冲区末行:Warp 无回滚缓冲(BufferHeight==WindowHeight),长输出后 menuTop 可能越界
     function Draw-FeatureMenu {
-        [Console]::SetCursorPosition(0, $menuTop)
+        [Console]::SetCursorPosition(0, [Math]::Min($menuTop, [Console]::BufferHeight - 1))
         $w = [Console]::WindowWidth
         $t = "==> $title"
         Write-Host ($t + (' ' * [Math]::Max(0, $w - 1 - (Get-DisplayWidth $t)))) -ForegroundColor Cyan
@@ -175,7 +184,9 @@ function Show-FeatureMenuTui {
     }
 
     # 光标移出菜单块再返回,别让后续输出覆写在菜单上
-    [Console]::SetCursorPosition(0, $menuTop + $blockH)
+    # 钳到缓冲区末行:长输出把光标钉在缓冲区底行时 menuTop+blockH 必然越界,
+    # 直接 Set 会抛 ArgumentOutOfRange(短缓冲终端实测),钳位后靠换行自然滚出新行
+    [Console]::SetCursorPosition(0, [Math]::Min($menuTop + $blockH, [Console]::BufferHeight - 1))
     Write-Host ""
     $picked = @()
     for ($i = 0; $i -lt $n; $i++) { if ($checked[$i]) { $picked += $optionalFeatures[$i].Id } }
@@ -188,12 +199,15 @@ function Select-OptionalFeatures {
     param([Parameter(Mandatory)] [AllowEmptyCollection()] [string[]]$Current)
     if ($optionalFeatures.Count -eq 0) { return ,@() }
     if (Test-TuiConsole) {
-        $tui = Show-FeatureMenuTui -Current $Current
+        # 渲染抛异常也降级编号输入,别让整个 start 崩;Ctrl+C 的 PipelineStoppedException 原样上抛
+        try { $tui = Show-FeatureMenuTui -Current $Current }
+        catch [System.Management.Automation.PipelineStoppedException] { throw }
+        catch { $tui = $null }
         if ($null -ne $tui) { return @($tui) }
         Write-Host "    (当前终端放不下按键式菜单,改为编号输入)" -ForegroundColor DarkGray
     }
     Write-Host ""
-    Write-Step "可选特性(勾选后生效;选择会保存到 $StateDir\features.txt,下次 start 自动沿用)"
+    Write-Step "可选特性(勾选后生效;选择会保存到 $vmStateDir\features.txt,下次 start 自动沿用)"
     for ($i = 0; $i -lt $optionalFeatures.Count; $i++) {
         $f = $optionalFeatures[$i]
         $mark   = if ($Current -contains $f.Id) { "[x]" } else { "[ ]" }
@@ -202,8 +216,131 @@ function Select-OptionalFeatures {
     }
     Write-Host "  输入要启用的编号:如 1;多个逗号分隔;a=全选 n=全不选;直接回车=保持当前"
     while ($true) {
-        $picked = ConvertTo-FeatureSelection -Answer (Read-Host "选择") -Current $Current
+        # Read-Host 异常兜底(EOF/终端抖动会抛绑定错,2026-08-29 实测):按空输入 → 保持当前选择
+        try { $ans = Read-Host "选择" } catch { $ans = '' }
+        $picked = ConvertTo-FeatureSelection -Answer "$ans" -Current $Current
         if ($null -ne $picked) { return @($picked) }
         Write-Warn "输入无法识别。示例: 1 / 1,2 / a / n / 回车保持当前"
+    }
+}
+
+# ====== 单选菜单(版本选择等场景)======
+# 与多选同一套交互语言:↑↓ 移动、回车 确认、数字键直接选;TUI 放不下降级编号输入。
+
+# 方向键单选 TUI。返回选中下标(int);无法渲染返回 $null(调用方降级编号输入)。
+function Show-SingleChoiceMenuTui {
+    param(
+        [Parameter(Mandatory)] [AllowEmptyCollection()] [string[]]$Options,
+        [int]$DefaultIndex = 0,
+        [string]$Title = '选择'
+    )
+    $n = $Options.Count
+    if ($n -eq 0) { return $null }
+    if ($DefaultIndex -lt 0 -or $DefaultIndex -ge $n) { $DefaultIndex = 0 }
+
+    $width = [Math]::Max(20, [Console]::WindowWidth - 12)
+    $items = @(); $blockH = 3   # 标题 1 行 + 两行提示
+    foreach ($o in $Options) {
+        $chunks = Wrap-FeatureText -Text ([string]$o) -Width ($width - 4)
+        $items += ,@([string[]]$chunks)
+        $blockH += $chunks.Count
+    }
+    if ([Console]::WindowHeight - $blockH -lt 2) { return $null }
+
+    $hint1 = '↑↓ 移动   回车 确认(> 为默认项)   数字键直接选择'
+    # 预留整块高度(同 Show-FeatureMenuTui):防 Draw 滚动导致 menuTop 失效、重绘错位
+    if ([Console]::BufferHeight - [Console]::CursorTop - 1 -lt $blockH) {
+        [Console]::Write(("`n" * ($blockH - ([Console]::BufferHeight - [Console]::CursorTop - 1))))
+        $menuTop = [Console]::CursorTop - $blockH + 1
+    } else {
+        $menuTop = [Console]::CursorTop
+    }
+    $cursor = $DefaultIndex
+
+    function Draw-SingleChoice {
+        [Console]::SetCursorPosition(0, [Math]::Min($menuTop, [Console]::BufferHeight - 1))
+        $w = [Console]::WindowWidth
+        $t = "==> $Title"
+        Write-Host ($t + (' ' * [Math]::Max(0, $w - 1 - (Get-DisplayWidth $t)))) -ForegroundColor Cyan
+        for ($i = 0; $i -lt $items.Count; $i++) {
+            $chunks = $items[$i]
+            for ($j = 0; $j -lt $chunks.Count; $j++) {
+                if ($j -eq 0) {
+                    $pre = if ($i -eq $cursor) { '> ' } else { '  ' }
+                    $line = "$pre$($i + 1). $($chunks[0])"
+                } else {
+                    $line = (' ' * 4) + $chunks[$j]
+                }
+                $line = $line + (' ' * [Math]::Max(0, $w - 1 - (Get-DisplayWidth $line)))
+                if ($i -eq $cursor) { Write-Host $line -ForegroundColor Yellow }
+                else { Write-Host $line }
+            }
+        }
+        $h = "  $hint1"
+        Write-Host ($h + (' ' * [Math]::Max(0, $w - 1 - (Get-DisplayWidth $h)))) -ForegroundColor DarkGray
+    }
+
+    $done = $false
+    try {
+        try { [Console]::CursorVisible = $false } catch {}
+        Draw-SingleChoice
+        while (-not $done) {
+            $k = [Console]::ReadKey($true)
+            switch ($k.Key) {
+                'UpArrow'   { $cursor = ($cursor - 1 + $n) % $n; Draw-SingleChoice }
+                'DownArrow' { $cursor = ($cursor + 1) % $n; Draw-SingleChoice }
+                'Enter'     { $done = $true }
+                default {
+                    $c = $k.KeyChar
+                    if ($c -ge [char]'1' -and $c -le [char]'9') {
+                        $idx = [int]$c - [int][char]'1'
+                        if ($idx -lt $n) { $cursor = $idx; $done = $true }
+                    }
+                }
+            }
+        }
+    } finally {
+        try { [Console]::CursorVisible = $true } catch {}
+    }
+
+    # 光标移出菜单块再返回,别让后续输出覆写在菜单上(钳位原因见 Show-FeatureMenuTui 末尾)
+    [Console]::SetCursorPosition(0, [Math]::Min($menuTop + $blockH, [Console]::BufferHeight - 1))
+    Write-Host ""
+    return $cursor
+}
+
+# 单选入口:TUI 优先,放不下/非 console 降级编号输入;回车=默认项。
+# 返回选中下标(int)。调用方负责非交互场景直接用默认值(不调本函数)。
+function Select-SingleChoice {
+    param(
+        [Parameter(Mandatory)] [AllowEmptyCollection()] [string[]]$Options,
+        [int]$DefaultIndex = 0,
+        [string]$Prompt = '选择'
+    )
+    if ($Options.Count -eq 0) { throw "Select-SingleChoice 收到空选项列表" }
+    if ($DefaultIndex -lt 0 -or $DefaultIndex -ge $Options.Count) { $DefaultIndex = 0 }
+    if (Test-TuiConsole) {
+        # 渲染抛异常也降级编号输入,别让整个 prepare-bundle 崩;Ctrl+C 的 PipelineStoppedException 原样上抛
+        try { $tui = Show-SingleChoiceMenuTui -Options $Options -DefaultIndex $DefaultIndex -Title $Prompt }
+        catch [System.Management.Automation.PipelineStoppedException] { throw }
+        catch { $tui = $null }
+        if ($null -ne $tui) { return $tui }
+        Write-Host "    (当前终端放不下按键式菜单,改为编号输入)" -ForegroundColor DarkGray
+    }
+    Write-Host ""
+    Write-Step $Prompt
+    for ($i = 0; $i -lt $Options.Count; $i++) {
+        $mark = if ($i -eq $DefaultIndex) { '*' } else { ' ' }
+        Write-Host ("  {0} {1}. {2}" -f $mark, ($i + 1), $Options[$i])
+    }
+    Write-Host "  回车=默认项(带 * 的)"
+    while ($true) {
+        # Read-Host 在输入流异常(EOF/Warp pty 抖动)时会抛错或返回 $null(2026-08-29 实测崩掉整个脚本);
+        # 兜底:任何异常按空输入处理 → 返回默认项
+        try { $ansRaw = Read-Host "输入编号" } catch { $ansRaw = $null }
+        $ans = if ($null -ne $ansRaw) { "$ansRaw".Trim() } else { '' }
+        if ($ans -eq '') { return $DefaultIndex }
+        if ($ans -match '^\d+$' -and [int]$ans -ge 1 -and [int]$ans -le $Options.Count) { return [int]$ans - 1 }
+        Write-Warn "输入无法识别。示例: 1 / 回车=默认"
     }
 }

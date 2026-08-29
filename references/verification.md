@@ -357,6 +357,121 @@ multipass exec claude-dev -- bash -lc '/usr/local/bin/wl-paste --list-types'
 
 ---
 
+## 测试 10:预装开发环境(dev-java / dev-python / dev-frontend,建议跑)
+
+**目的**:验证开发环境特性——离线 bundle 优先安装(重建 VM 秒装)、在线兜底、记忆块含环境说明、取消勾选单项后对应行消失。
+
+### 步骤
+
+```powershell
+# (a) 准备离线件(需真人终端,菜单里给 JDK/Maven/uv/pnpm 选版本;Claude 代跑=非交互会跳过)
+.\scripts\prepare-bundle.ps1
+# 状态汇总应出现 jdk/OpenJDK17U-*.tar.gz、maven/*.tar.gz、uv/*.whl、pnpm/*.tgz 四行 OK
+
+# (b) 启用三项并重建 VM(离线装只在新建 VM 时发生;现有 VM 走在线兜底)
+Add-Content "$env:USERPROFILE\.cc-sandbox\claude-dev\features.txt" "dev-java"
+Add-Content "$env:USERPROFILE\.cc-sandbox\claude-dev\features.txt" "dev-python"
+Add-Content "$env:USERPROFILE\.cc-sandbox\claude-dev\features.txt" "dev-frontend"
+.\scripts\launch.ps1 delete
+.\scripts\launch.ps1 start
+# 预期:bundle 安装阶段进度事件含 "dev-java:JDK 17 已离线安装" 等;Start-DevEnvs 三行"已在"
+
+# (c) VM 内验证工具链 + Maven 镜像
+multipass exec claude-dev -- bash -lc "java -version 2>&1 | head -1; mvn -v 2>/dev/null | head -1; uv --version; pnpm -v"
+multipass exec claude-dev -- bash -lc "grep -c aliyun ~/.m2/settings.xml"   # 预期 2(id 和 url)
+# java 预期 Temurin:openjdk version "17.0.x" 20xx-xx-xx(Temurin 标记,不再是 Ubuntu 打包版)
+
+# (d) 记忆块含"预装开发环境"节
+multipass exec claude-dev -- bash -lc "sed -n '/cc-sandbox:begin/,/cc-sandbox:end/p' ~/.claude/CLAUDE.md"
+
+# (e) 幂等:再跑一次 start,应显示"已在"并秒过
+.\scripts\launch.ps1 start
+
+# (f) status 探测
+.\scripts\launch.ps1 status     # "开发环境"段三项 OK
+
+# (g) 取消勾选 dev-frontend:path-map 仍启用 → 块保留,环境节不再含 pnpm 行
+(Get-Content "$env:USERPROFILE\.cc-sandbox\claude-dev\features.txt") | Where-Object { $_ -ne 'dev-frontend' } | Set-Content "$env:USERPROFILE\.cc-sandbox\claude-dev\features.txt"
+.\scripts\launch.ps1 start
+multipass exec claude-dev -- bash -lc "sed -n '/cc-sandbox:begin/,/cc-sandbox:end/p' ~/.claude/CLAUDE.md | grep -c pnpm"
+
+# (h) 在线兜底(可选,验证降级路径):临时挪走 uv 缓存后重建
+Move-Item "$env:USERPROFILE\.cc-sandbox\bundle\uv" "$env:USERPROFILE\.cc-sandbox\bundle\uv.bak"
+.\scripts\launch.ps1 delete
+.\scripts\launch.ps1 start      # 预期:uv 走"在线兜底"提示并 pip 安装成功
+Move-Item "$env:USERPROFILE\.cc-sandbox\bundle\uv.bak" "$env:USERPROFILE\.cc-sandbox\bundle\uv" -Force
+```
+
+### 预期汇总
+
+| 检查项 | 预期 |
+|---|---|
+| (a) prepare-bundle | 四个可选件菜单出现(默认跳过,选版本才下);状态汇总四行 OK |
+| (b) start(新 VM) | "JDK 17/Maven/uv/pnpm 已离线安装"事件 + 探测三行"已在" |
+| (c) 版本 | Temurin openjdk 17.0.x / Maven 3.x / uv x.y.z / pnpm x.y.z |
+| (d) 记忆块 | 含 `### 预装开发环境`,三项各一行;uv 行含 `uv venv` 用法 |
+| (e) 幂等 | 三行"已在",秒级 |
+| (f) status | "开发环境"段三项"已装" |
+| (g) 关闭单项 | grep 计数 0;包仍留在 VM 里(pnpm -v 仍可用) |
+| (h) 兜底 | uv 提示"在线兜底"并装上;其余离线件不受影响 |
+
+**prepare-bundle 版本菜单**(需真人终端):裸跑 `.\scripts\prepare-bundle.ps1 -Force` 应依次弹核心三件 + 四个可选件的单选菜单(TUI,窗口小自动降级编号输入);非交互(如 `cmd /c ".\scripts\prepare-bundle.ps1 < nul"`,不加 -Force)不弹菜单,核心件沿用缓存,可选件无缓存时打印"跳过"提示。
+
+---
+
+## 测试 11:多 VM(-Name)并存与共享(建议跑)
+
+**目的**:验证 `-Name` 起独立 VM;状态按 VM 分目录;clip-daemon 全局单例被多台复用(停一台另一台仍可用);status 总览。
+
+### 步骤
+
+```powershell
+# (a) 为第二台 VM 准备独立配置(子目录 = VM 名)
+New-Item -ItemType Directory "$env:USERPROFILE\.cc-sandbox\dev-t2" -Force
+Copy-Item "$env:USERPROFILE\.cc-sandbox\claude-dev\mounts.txt" "$env:USERPROFILE\.cc-sandbox\dev-t2\mounts.txt"
+Set-Content "$env:USERPROFILE\.cc-sandbox\dev-t2\features.txt" "clip-bridge"   # 只开剪贴板桥,便于验证 daemon 共享
+
+# (b) 起第二台(镜像已缓存,几分钟)
+.\scripts\launch.ps1 start -Name dev-t2
+# 预期:剪贴板桥 daemon "复用(全局共享,PID ...)"——不再起新进程;桥隧道按 VM 各自一条
+
+# (c) 两台并存,status 无 -Name 给总览
+.\scripts\launch.ps1 status
+# 预期:claude-dev 与 dev-t2 两行(状态/IP/特性)
+.\scripts\launch.ps1 status -Name dev-t2     # 单台详情
+
+# (d) daemon 共享验证:停默认台,daemon 应存活(dev-t2 还在用)
+.\scripts\launch.ps1 stop
+Get-Process -Id (Get-Content "$env:USERPROFILE\.cc-sandbox\.clip-daemon.pid") -ErrorAction SilentlyContinue
+# 预期:进程存在(未停)
+multipass exec dev-t2 -- bash -lc "curl -s --max-time 5 http://127.0.0.1:18339/health"
+# 预期:{"status":"ok"} —— dev-t2 的桥不受 claude-dev 停机影响
+
+# (e) 全部停掉后 daemon 才退场
+.\scripts\launch.ps1 stop -Name dev-t2
+Get-Process -Id (Get-Content "$env:USERPROFILE\.cc-sandbox\.clip-daemon.pid" -ErrorAction SilentlyContinue) -ErrorAction SilentlyContinue
+# 预期:无输出(daemon 已停)
+
+# (f) 清理第二台
+.\scripts\launch.ps1 delete -Name dev-t2
+Remove-Item "$env:USERPROFILE\.cc-sandbox\dev-t2" -Recurse -Force
+.\scripts\launch.ps1 start     # 恢复默认台
+```
+
+### 预期汇总
+
+| 检查项 | 预期 |
+|---|---|
+| (b) 第二台 start | daemon 复用不重起;垫片/隧道独立部署到 dev-t2 |
+| (c) status 总览 | 两台 VM 一行一台;`-Name` 进单台详情 |
+| (d) 停一台 | daemon 存活;另一台桥仍通 |
+| (e) 全停 | daemon 退出 |
+| (f) delete -Name | 只删指定台;默认台不受影响 |
+
+另:一次性迁移验证——首次用新版跑任意子命令,根目录旧的 mounts.txt/features.txt 等应自动移入 `claude-dev\` 子目录并打印"一次性迁移"提示。
+
+---
+
 ## 发现问题怎么办
 
 按现象查 [troubleshooting.md](./troubleshooting.md):

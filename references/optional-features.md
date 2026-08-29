@@ -1,4 +1,4 @@
-# 可选功能:VM 内 Docker / 跨网络访问(Tailscale) / 宿主机路径换算 / 剪贴板图片粘贴
+# 可选功能:VM 内 Docker / 跨网络访问(Tailscale) / 宿主机路径换算 / 剪贴板图片粘贴 / 预装开发环境
 
 ## 宿主机路径自动换算(路径映射记忆)
 
@@ -34,6 +34,24 @@ VM 里的 Claude Code 按表换算成 `/home/ubuntu/workspace/share-dir-01/test-
 - 体检:`.\scripts\launch.ps1 status` 的"剪贴板桥"段显示 daemon / 桥隧道 / VM→宿主端到端三项状态
 - 出问题看日志 `%USERPROFILE%\.cc-sandbox\clip-daemon.log`;端到端没通多半是隧道没起好,重跑 `start` 自愈
 - 注意:桥只负责**把图送进 Claude Code**;模型能不能真"看见"图,取决于当时接的 LLM 后端是否支持/透传 image 块(部分中转网关会丢 tool_result 里的图片,与桥无关)
+
+## 预装开发环境(dev-java / dev-python / dev-frontend)
+
+勾选后,`start` 自动在 VM 里装好对应环境(非重建型,不用 delete + start),已装的探测到就跳过(幂等):
+
+| 特性 id | 装什么 | 装法 |
+|---|---|---|
+| `dev-java` | JDK 17(Adoptium Temurin)+ Maven + 阿里云镜像 | **离线 bundle 优先**(bundle 里的 jdk/maven tarball,秒装);bundle 缺件或 VM 已存在时**回退在线 apt**(几百 MB,首次较慢)。Maven 幂等写入 `~/.m2/settings.xml` 镜像(已有配置不覆盖) |
+| `dev-python` | python3(基础镜像自带)+ `uv` | **离线 bundle 优先**(uv wheel 解出二进制);缺件时回退在线 apt+pip。venv/包管理全走 uv(`uv venv`/`uv add`),不装 apt 的 python3-venv |
+| `dev-frontend` | `pnpm`(10 系) | **离线 bundle 优先**(本地 tgz npm -g);缺件时回退 npm 全局装 `pnpm@10`。10.x 兼容 Node 20(11.x 需 Node 22,故不提供) |
+
+- **离线件从哪来**:`.\scripts\prepare-bundle.ps1` 交互终端跑一次,菜单里给 JDK/Maven/uv/pnpm 选装版本(默认跳过,选了才下;非交互跑不会自动下这 ~240MB)。装进 VM 的就是当时选定的版本
+- 现有 VM 首次勾选走在线兜底装;之后 delete + start 重建的 VM 全走离线秒装
+- 装好后写进 VM 里 Claude Code 的全局记忆(`~/.claude/CLAUDE.md` 的 managed block):VM 里的 claude 知道自己有哪些环境、uv/pnpm 怎么用
+- 与"路径映射记忆"**共用同一个 managed block**:任一启用就写,全部取消勾选才移除整块
+- 安装失败只警告不阻塞 start(环境是增强不是依赖);重跑 `start` 自愈
+- 取消勾选只是"不再管理":装好的包留在 VM 里,记忆块也不再提它(想彻底清掉用 delete + start 重建)
+- 体检:`.\scripts\launch.ps1 status` 的"开发环境"段按勾选逐项探测
 
 ## VM 内装 Docker
 

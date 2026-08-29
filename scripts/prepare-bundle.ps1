@@ -1,39 +1,45 @@
 <#
 .SYNOPSIS
-    准备离线 bundle(Node 20 LTS + Claude Code),让 cloud-init 不用联网下载。
+    准备离线 bundle(Node 20 LTS + Claude Code + cc-pocket),让 VM 创建不依赖网络下载。
 
 .PARAMETER Force
-    重新下载所有,即使文件已存在。
+    重新选版本 + 重新下载(即使文件已存在)。
+    不加时:文件已存在的组件直接沿用缓存,零交互零网络。
 
-.PARAMETER NodeVersion
-    指定 Node 版本(如 "v20.20.2")。不指定时自动取最新 20.x LTS。
-
-.PARAMETER CcPocketVersion
-    指定 cc-pocket 版本(如 "v1.7.6")。不指定时优先从已缓存文件名取版本(更新用 -Force),
-    无缓存时在线解析最新版(避开 GitHub API 限流)。
+    版本选择(仅当该组件需要下载时才弹;非交互终端自动用默认):
+      Node         默认 v20.20.2(实测锁定版,恒为默认,无"上次选择");
+                   菜单实时列最近 5 个 20.x LTS + 手动输入
+      Claude Code  默认最新版(latest);菜单另列最近 5 个正式版(npm 实时取)、
+                   与宿主机一致(探测 claude --version)/ 保持缓存 / 手动输入
+      cc-pocket    默认"保持缓存"(无缓存则最新)
+    可选开发环境组件(JDK17/Maven/uv/pnpm,默认跳过,交互菜单选装;
+    非交互且无缓存直接跳过不下载,要装就在交互终端跑一次):
+      JDK 17   Adoptium Temurin tarball,清华镜像(~190MB)
+      Maven    bin tarball,阿里云 apache 镜像(~9MB)
+      uv       PyPI manylinux wheel,清华镜像(~35MB)
+      pnpm     npm pack 本地 tgz(~9MB)
+    切换版本会自动清掉 bundle 里的旧版本文件
+    (install-bundle.sh 按 glob 装,不容忍多版本并存)。
 
 .EXAMPLE
-    .\scripts\prepare-bundle.ps1              # 缺啥下啥
-    .\scripts\prepare-bundle.ps1 -Force       # 重新下载所有
-    .\scripts\prepare-bundle.ps1 -NodeVersion v20.20.2  # 指定版本
+    .\scripts\prepare-bundle.ps1              # 缺啥下啥;缺的组件交互选版本(非交互用默认)
+    .\scripts\prepare-bundle.ps1 -Force       # 重新选版本 + 全量重下
 
 bundle 下载到状态目录 %USERPROFILE%\.cc-sandbox\bundle(写死,与 launch.ps1 同一位置),
-不占用 skill 包目录。
-
-bundle 内容(约 220MB,含 cc-pocket):
-  - node-vXX.X.X-linux-x64.tar.xz          Node 20 LTS Linux 二进制 (~25MB)
-  - anthropic-ai-claude-code-X.X.X.tgz     Claude Code wrapper 包 (~25KB)
-  - anthropic-ai-claude-code-linux-x64-X.X.X.tgz  Claude Code Linux 真二进制 (~93MB)
-
-注意:@anthropic-ai/claude-code 是 wrapper 包,真二进制在平台特定的
-@anthropic-ai/claude-code-linux-x64。两个都要 bundle,wrapper 的 postinstall
-才会把真二进制装到位。
+不占用 skill 包目录。核心件(约 220 MB):
+  - node-vXX.X.X-linux-x64.tar.xz          Node 20 LTS Linux 官方 tarball
+  - anthropic-ai-claude-code-X.X.X.tgz     Claude Code wrapper 包(postinstall 装真二进制)
+  - anthropic-ai-claude-code-linux-x64-X.X.X.tgz  Claude Code Linux 真二进制
+  - cc-pocket/cc-pocket-daemon-X.X.X-linux-x86_64.tar.gz  cc-pocket 手机遥控(自带 JRE)
+可选开发环境件(另约 240 MB,全选时):
+  - jdk/OpenJDK17U-jdk_x64_linux_hotspot_17.0.X_Y.tar.gz
+  - maven/apache-maven-X.X.X-bin.tar.gz
+  - uv/uv-X.X.X-py3-none-manylinux_x86_64.whl
+  - pnpm/pnpm-X.X.X.tgz
 #>
 [CmdletBinding()]
 param(
-    [switch]$Force,
-    [string]$NodeVersion,
-    [string]$CcPocketVersion
+    [switch]$Force
 )
 
 $ErrorActionPreference = 'Stop'
@@ -41,77 +47,17 @@ $ErrorActionPreference = 'Stop'
 $StateDir = Join-Path $env:USERPROFILE '.cc-sandbox'
 if (-not (Test-Path $StateDir)) { New-Item -ItemType Directory -Path $StateDir -Force | Out-Null }
 $bundleDir = Join-Path $StateDir 'bundle'
+if (-not (Test-Path $bundleDir)) { New-Item -ItemType Directory -Path $bundleDir -Force | Out-Null }
+
+. (Join-Path $PSScriptRoot 'feature-menu.ps1')
 
 function Write-Step($m) { Write-Host "==> $m" -ForegroundColor Cyan }
 function Write-Ok($m)   { Write-Host "    OK  $m" -ForegroundColor Green }
 function Write-Warn($m) { Write-Host "    !   $m" -ForegroundColor Yellow }
 function Write-Err($m)  { Write-Host "    X   $m" -ForegroundColor Red }
 
-if (-not (Test-Path $bundleDir)) {
-    New-Item -ItemType Directory -Path $bundleDir | Out-Null
-}
-
-# ---------- 1. Node 20 LTS ----------
-Write-Step "查 Node 20 LTS 版本..."
-
-if (-not $NodeVersion) {
-    try {
-        $idx = Invoke-RestMethod -Uri 'https://nodejs.org/dist/index.json' -TimeoutSec 30
-        $latest20 = $idx | Where-Object {
-            $_.version -match '^v20\.' -and $_.lts -ne $false -and $null -ne $_.lts
-        } | Select-Object -First 1
-        if (-not $latest20) { throw "index.json 里找不到 20.x LTS" }
-        $NodeVersion = $latest20.version
-    } catch {
-        Write-Err "拉 Node 版本索引失败:$($_.Exception.Message)"
-        Write-Err "可用 -NodeVersion v20.20.2 显式指定"
-        exit 1
-    }
-}
-
-$nodeFile = "node-$NodeVersion-linux-x64.tar.xz"
-$nodePath = Join-Path $bundleDir $nodeFile
-$nodeUrl  = "https://nodejs.org/dist/$NodeVersion/$nodeFile"
-
-if ((-not $Force) -and (Test-Path $nodePath)) {
-    Write-Ok "Node 已存在:$nodeFile(用 -Force 重下)"
-} else {
-    if ($Force) {
-        Get-ChildItem $bundleDir -Filter 'node-v*-linux-x64.tar.xz' -ErrorAction SilentlyContinue |
-            Remove-Item -Force -ErrorAction SilentlyContinue
-    }
-    Write-Step "下载 $nodeUrl (~25MB)..."
-    try {
-        $proto = [System.Net.ServicePointManager]::SecurityProtocol
-        [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
-        Invoke-WebRequest -Uri $nodeUrl -OutFile $nodePath -TimeoutSec 600 -UseBasicParsing
-        [System.Net.ServicePointManager]::SecurityProtocol = $proto
-        $size = [math]::Round((Get-Item $nodePath).Length / 1MB, 1)
-        Write-Ok "Node 下载完成:$nodeFile ($size MB)"
-    } catch {
-        Write-Err "Node 下载失败:$($_.Exception.Message)"
-        if (Test-Path $nodePath) { Remove-Item $nodePath -Force -ErrorAction SilentlyContinue }
-        exit 1
-    }
-}
-
-# ---------- 2. Claude Code(wrapper + Linux 真二进制)----------
-Write-Step "查 Claude Code npm 包..."
-
-$npm = Get-Command npm -ErrorAction SilentlyContinue
-if (-not $npm) {
-    Write-Err "宿主机没装 npm。装 Node 后重试"
-    exit 1
-}
-
-# 两份 tgz:wrapper(小,~25KB)+ Linux 真二进制(大,~93MB)
-$wrapperPattern = 'anthropic-ai-claude-code-*.tgz'
-$linuxPattern   = 'anthropic-ai-claude-code-linux-x64-*.tgz'
-# 排除 linux-x64:wrapper 文件名是 anthropic-ai-claude-code-X.X.X.tgz,linux 是 ...-linux-x64-X.X.X.tgz
-$existingWrapper = Get-ChildItem $bundleDir -Filter $wrapperPattern -ErrorAction SilentlyContinue |
-    Where-Object { $_.Name -notmatch 'linux-x64' } | Sort-Object LastWriteTime -Desc | Select-Object -First 1
-$existingLinux   = Get-ChildItem $bundleDir -Filter $linuxPattern -ErrorAction SilentlyContinue |
-    Sort-Object LastWriteTime -Desc | Select-Object -First 1
+# 真人终端才弹菜单(与 launch.ps1 同原则:管道/后台/Claude 代跑自动用默认)
+$interactive = Test-InteractiveConsole
 
 function Invoke-NpmPack {
     param([string]$Pkg)
@@ -144,56 +90,187 @@ function Invoke-NpmPack {
     }
 }
 
-# wrapper 包(小,快)
-if ((-not $Force) -and $existingWrapper) {
-    Write-Ok "Claude Code wrapper 已存在:$($existingWrapper.Name)"
+# ---------- 1. Node 20 LTS ----------
+# 默认恒为 v20.20.2(实测锁定,无"上次选择");缓存文件本身就是状态——
+# 不加 -Force 且文件在 → 直接沿用,不弹菜单不联网
+$nodeDefault = 'v20.20.2'
+$existingNode = Get-ChildItem $bundleDir -Filter 'node-v*-linux-x64.tar.xz' -ErrorAction SilentlyContinue |
+    Sort-Object LastWriteTime -Descending | Select-Object -First 1
+
+if ((-not $Force) -and $existingNode) {
+    Write-Ok "Node 已存在:$($existingNode.Name)(用 -Force 重选/重下)"
 } else {
-    if ($Force) {
-        Get-ChildItem $bundleDir -Filter $wrapperPattern -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -notmatch 'linux-x64' } |
-            Remove-Item -Force -ErrorAction SilentlyContinue
+    # 选版本:默认 v20.20.2 + 实时最近 5 个 20.x LTS + 手动输入
+    $recent = @()
+    if ($interactive) {
+        try {
+            $idx = Invoke-RestMethod -Uri 'https://nodejs.org/dist/index.json' -TimeoutSec 30
+            $recent = @($idx | Where-Object { $_.version -match '^v20\.' -and $null -ne $_.lts } |
+                Select-Object -First 5 | ForEach-Object { $_.version })
+        } catch {
+            Write-Warn "拉取 Node 版本索引失败(离线?只提供默认+手动输入): $($_.Exception.Message)"
+        }
     }
-    Write-Step "npm pack @anthropic-ai/claude-code(wrapper,~25KB)..."
+    $nodeChoice = $nodeDefault
+    if ($interactive) {
+        $options = @()
+        if ($recent -notcontains $nodeDefault) { $options += $nodeDefault }
+        $options += $recent
+        $options += '(手动输入版本号)'
+        $i = Select-SingleChoice -Options $options `
+            -DefaultIndex ([array]::IndexOf($options, $nodeDefault)) `
+            -Prompt "Node 版本(默认 $nodeDefault)"
+        if ($options[$i] -like '(手动输入*)') {
+            while ($true) {
+                $v = (Read-Host '输入 Node 版本(如 v20.19.1)').Trim()
+                if ($v -match '^v20\.\d+\.\d+$') { $nodeChoice = $v; break }
+                Write-Warn "格式应为 v20.x.y,当前输入: $v"
+            }
+        } else {
+            $nodeChoice = $options[$i]
+        }
+    } else {
+        if (-not $recent) { Write-Host "    Node 版本:非交互,用默认 $nodeDefault" -ForegroundColor DarkGray }
+    }
+
+    $nodeFile = "node-$nodeChoice-linux-x64.tar.xz"
+    $nodePath = Join-Path $bundleDir $nodeFile
+    $nodeUrl  = "https://nodejs.org/dist/$nodeChoice/$nodeFile"
+    Write-Step "下载 $nodeUrl (~25MB)..."
     try {
-        $p = Invoke-NpmPack -Pkg '@anthropic-ai/claude-code'
-        Write-Ok "wrapper 打包完成:$(Split-Path $p -Leaf)"
+        $proto = [System.Net.ServicePointManager]::SecurityProtocol
+        [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
+        Invoke-WebRequest -Uri $nodeUrl -OutFile $nodePath -TimeoutSec 600 -UseBasicParsing
+        [System.Net.ServicePointManager]::SecurityProtocol = $proto
+        $size = [math]::Round((Get-Item $nodePath).Length / 1MB, 1)
+        Write-Ok "Node 下载完成:$nodeFile ($size MB)"
     } catch {
-        Write-Err $_.Exception.Message
+        Write-Err "Node 下载失败:$($_.Exception.Message)"
+        if (Test-Path $nodePath) { Remove-Item $nodePath -Force -ErrorAction SilentlyContinue }
         exit 1
     }
+    # 换版本清旧:删掉非当前版本的其他 node tarball
+    Get-ChildItem $bundleDir -Filter 'node-v*-linux-x64.tar.xz' -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -ne $nodeFile } |
+        Remove-Item -Force -ErrorAction SilentlyContinue
 }
 
-# Linux 真二进制(大,慢)
-if ((-not $Force) -and $existingLinux) {
-    Write-Ok "Claude Code Linux 二进制已存在:$($existingLinux.Name)"
+# ---------- 2. Claude Code(wrapper + Linux 真二进制)----------
+$wrapperPattern = 'anthropic-ai-claude-code-*.tgz'
+$linuxPattern   = 'anthropic-ai-claude-code-linux-x64-*.tgz'
+# 排除 linux-x64:wrapper 文件名是 anthropic-ai-claude-code-X.X.X.tgz,linux 是 ...-linux-x64-X.X.X.tgz
+$existingWrapper = Get-ChildItem $bundleDir -Filter $wrapperPattern -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -notmatch 'linux-x64' } | Sort-Object LastWriteTime -Desc | Select-Object -First 1
+$existingLinux   = Get-ChildItem $bundleDir -Filter $linuxPattern -ErrorAction SilentlyContinue |
+    Sort-Object LastWriteTime -Desc | Select-Object -First 1
+
+# 宿主机 claude 版本(默认选项的锚点;探测不到就退回"最新")
+$hostVer = $null
+try {
+    $v = (& claude --version 2>$null | Select-Object -First 1)
+    if ($v -match '(\d+\.\d+\.\d+)') { $hostVer = $Matches[1] }
+} catch { }
+
+if ((-not $Force) -and $existingWrapper -and $existingLinux) {
+    Write-Ok "Claude Code 已存在:$($existingWrapper.Name) / $($existingLinux.Name)(用 -Force 重选/重下)"
 } else {
-    if ($Force) {
-        Get-ChildItem $bundleDir -Filter $linuxPattern -ErrorAction SilentlyContinue |
-            Remove-Item -Force -ErrorAction SilentlyContinue
+    # 选项与 Node 同构:默认项排第一 = 当前缓存版本,其后 npm 最近 5 个正式版。
+    # 缓存两件套(wrapper+linux)齐全才给"保持缓存"——只剩一半时默认回"最新"重下补齐,避免坏包
+    $cachedVer = $null
+    if ($existingWrapper -and $existingLinux -and $existingWrapper.Name -match 'claude-code-(\d+\.\d+\.\d+)\.tgz') { $cachedVer = $Matches[1] }
+    $recentCc = @()
+    if ($interactive) {
+        try {
+            $npmCmd = (Get-Command npm.cmd -ErrorAction SilentlyContinue).Source
+            if (-not $npmCmd) { throw 'npm.cmd 不在 PATH' }
+            $out = & $npmCmd view '@anthropic-ai/claude-code' versions --json 2>$null
+            # 两个 PS 5.1 坑,叠加导致"最近 5 个"从来没生效过、菜单里出现空格拼接的巨串(实测):
+            # 1) 多行 JSON 逐行管道进 ConvertFrom-Json,它把拼出的整个数组当"单个对象"返回;
+            # 2) @(ConvertFrom-Json ...) 收集管道输出,同样只得 1 个嵌套数组对象。
+            # 必须:先 -join 回完整文本、裸赋值(不加 @()),下游 "$vers | ..." 会自行枚举数组
+            $vers = ConvertFrom-Json ($out -join "`n")
+            # 过滤预发布(带 - 的),取最近 5 个正式版,倒序(新→旧,与 Node 菜单一致)
+            $recentCc = @($vers | Where-Object { "$_" -notmatch '-' } | Select-Object -Last 5)
+            [array]::Reverse($recentCc)
+        } catch {
+            Write-Warn "拉取 Claude Code 版本列表失败(离线?只提供 默认/宿主一致/手动)"
+        }
     }
-    Write-Step "npm pack @anthropic-ai/claude-code-linux-x64(真二进制,~93MB,慢)..."
-    try {
-        $p = Invoke-NpmPack -Pkg '@anthropic-ai/claude-code-linux-x64'
-        $size = [math]::Round((Get-Item $p).Length / 1MB, 1)
-        Write-Ok "Linux 二进制打包完成:$(Split-Path $p -Leaf) ($size MB)"
-    } catch {
-        Write-Err $_.Exception.Message
-        exit 1
+    $choices = @()
+    if ($cachedVer) {
+        $choices += @{ Label = "保持缓存版本 v$cachedVer(不重新下载)"; Ver = "cached:$cachedVer" }
+        $defaultLabel = "v$cachedVer(保持缓存)"
+    } else {
+        $choices += @{ Label = '最新版(latest)'; Ver = 'latest' }
+        $defaultLabel = 'latest'
+    }
+    foreach ($v in ($recentCc | Where-Object { $_ -ne $cachedVer })) { $choices += @{ Label = "$v"; Ver = $v } }
+    if ($hostVer -and $hostVer -ne $cachedVer) { $choices += @{ Label = "与宿主机一致 v$hostVer"; Ver = $hostVer } }
+    $choices += @{ Label = '手动输入版本号'; Ver = 'manual' }
+
+    $pick = $choices[0]   # 非交互默认:有缓存用缓存,否则最新
+    if ($interactive) {
+        $labels = @($choices | ForEach-Object { $_.Label })
+        $i = Select-SingleChoice -Options $labels -DefaultIndex 0 -Prompt "Claude Code 版本(默认 $defaultLabel)"
+        $pick = $choices[$i]
+    }
+
+    if ($pick.Ver -like 'cached:*') {
+        Write-Ok "Claude Code 沿用缓存 v$($pick.Ver.Split(':')[1])"
+    } else {
+        $ccVer = $pick.Ver
+        if ($ccVer -eq 'manual') {
+            while ($true) {
+                $ccVer = (Read-Host '输入 Claude Code 版本(如 2.1.239)').Trim()
+                if ($ccVer -match '^\d+\.\d+\.\d+$') { break }
+                Write-Warn "格式应为 X.Y.Z,当前输入: $ccVer"
+            }
+        }
+        $pkgSuffix = if ($ccVer -eq 'latest') { '' } else { "@$ccVer" }
+        $npm = Get-Command npm -ErrorAction SilentlyContinue
+        if (-not $npm) {
+            Write-Err "宿主机没装 npm。装 Node 后重试"
+            exit 1
+        }
+        Write-Step "npm pack @anthropic-ai/claude-code$pkgSuffix(wrapper,~25KB)..."
+        try {
+            Invoke-NpmPack -Pkg "@anthropic-ai/claude-code$pkgSuffix" | Out-Null
+        } catch {
+            Write-Err $_.Exception.Message
+            exit 1
+        }
+        Write-Step "npm pack @anthropic-ai/claude-code-linux-x64$pkgSuffix(真二进制,~93MB,慢)..."
+        try {
+            $packed = Invoke-NpmPack -Pkg "@anthropic-ai/claude-code-linux-x64$pkgSuffix"
+            $size = [math]::Round((Get-Item $packed).Length / 1MB, 1)
+            Write-Ok "Linux 二进制打包完成:$(Split-Path $packed -Leaf) ($size MB)"
+        } catch {
+            Write-Err $_.Exception.Message
+            exit 1
+        }
+    }
+    # 换版本清旧:以最终留在目录里的最新文件为基准,删其它版本
+    $keepWrapper = Get-ChildItem $bundleDir -Filter $wrapperPattern -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -notmatch 'linux-x64' } | Sort-Object LastWriteTime -Desc | Select-Object -First 1
+    if ($keepWrapper -and $keepWrapper.Name -match 'claude-code-(\d+\.\d+\.\d+)\.tgz') {
+        $keepVer = $Matches[1]
+        Get-ChildItem $bundleDir -Filter 'anthropic-ai-claude-code-*.tgz' -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -notmatch [regex]::Escape($keepVer) } |
+            Remove-Item -Force -ErrorAction SilentlyContinue
     }
 }
 
 # ---------- 3. cc-pocket Linux x86_64 ----------
 Write-Step "查 cc-pocket daemon 版本..."
-# 非 -Force 且已有缓存:版本直接取文件名(缺啥下啥;探测 GitHub 会把全缓存场景变成强制联网)
-if (-not $CcPocketVersion -and -not $Force) {
-    $cachedAsset = Get-ChildItem (Join-Path $bundleDir 'cc-pocket') -Filter 'cc-pocket-daemon-*-linux-x86_64.tar.gz' -ErrorAction SilentlyContinue |
-        Select-Object -First 1
-    if ($cachedAsset -and $cachedAsset.Name -match '^cc-pocket-daemon-(.+)-linux-x86_64\.tar\.gz$') {
-        $CcPocketVersion = $Matches[1]
-        Write-Ok "cc-pocket 已缓存,版本取自文件名: v$CcPocketVersion(更新用 -Force)"
-    }
+# 缓存版本直接取文件名(缺啥下啥;-Force 或无缓存才需要解析/选择)
+$cachedAsset = Get-ChildItem (Join-Path $bundleDir 'cc-pocket') -Filter 'cc-pocket-daemon-*-linux-x86_64.tar.gz' -ErrorAction SilentlyContinue |
+    Select-Object -First 1
+$cachedPocketVer = $null
+if ($cachedAsset -and $cachedAsset.Name -match '^cc-pocket-daemon-(.+)-linux-x86_64\.tar\.gz$') {
+    $cachedPocketVer = $Matches[1]
 }
-if (-not $CcPocketVersion) {
+
+function Resolve-LatestCcPocketVersion {
     # Avoid GitHub API rate limits: releases/latest redirects to the tag without API access.
     try {
         $request = [System.Net.HttpWebRequest]::Create('https://github.com/heypandax/cc-pocket/releases/latest')
@@ -202,22 +279,58 @@ if (-not $CcPocketVersion) {
         $location = $response.Headers['Location']
         $response.Close()
         if ($location -notmatch '/tag/([^/?#]+)') { throw '无法从 releases/latest 重定向地址解析版本' }
-        $CcPocketVersion = $Matches[1]
+        return $Matches[1].TrimStart('v')
     } catch {
-        throw "无法解析 cc-pocket 最新版本（已避开 GitHub API 限流）: $($_.Exception.Message)。可用 -CcPocketVersion vX.Y.Z 显式指定版本"
+        throw "无法解析 cc-pocket 最新版本（已避开 GitHub API 限流）: $($_.Exception.Message)"
     }
 }
-$ccVersion = $CcPocketVersion.TrimStart('v')
+
+$ccVersion = $null
+if ((-not $Force) -and $cachedPocketVer) {
+    $ccVersion = $cachedPocketVer
+    Write-Ok "cc-pocket 已缓存,版本取自文件名: v$ccVersion(用 -Force 重选/重下)"
+} else {
+    $pickVer = if ($cachedPocketVer) { "cached:$cachedPocketVer" } else { 'latest' }
+    if ($interactive) {
+        $choices = @()
+        $dflt = 0
+        if ($cachedPocketVer) {
+            $choices += @{ Label = "保持缓存版本 v$cachedPocketVer(不重新下载)"; Ver = "cached:$cachedPocketVer" }
+        }
+        $choices += @{ Label = '最新版(latest,需访问 GitHub)'; Ver = 'latest' }
+        $choices += @{ Label = '手动输入版本号'; Ver = 'manual' }
+        if (-not $cachedPocketVer) { $dflt = 0 } else { $dflt = 0 }
+        $labels = @($choices | ForEach-Object { $_.Label })
+        $i = Select-SingleChoice -Options $labels -DefaultIndex $dflt -Prompt 'cc-pocket 版本'
+        $pickVer = $choices[$i].Ver
+    }
+    if ($pickVer -like 'cached:*') {
+        $ccVersion = $pickVer.Split(':')[1]
+    } elseif ($pickVer -eq 'manual') {
+        while ($true) {
+            $v = (Read-Host '输入 cc-pocket 版本(如 1.8.1)').Trim().TrimStart('v')
+            if ($v -match '^\d+\.\d+\.\d+$') { $ccVersion = $v; break }
+            Write-Warn "格式应为 X.Y.Z,当前输入: $v"
+        }
+    } else {
+        $ccVersion = Resolve-LatestCcPocketVersion
+    }
+}
+
 $ccAsset = "cc-pocket-daemon-$ccVersion-linux-x86_64.tar.gz"
 $ccDir = Join-Path $bundleDir 'cc-pocket'
 $ccPath = Join-Path $ccDir $ccAsset
-if ($Force -and (Test-Path $ccDir)) { Remove-Item $ccDir -Recurse -Force }
 if (-not (Test-Path $ccPath)) {
     New-Item -ItemType Directory -Path $ccDir -Force | Out-Null
     $ccUrl = "https://github.com/heypandax/cc-pocket/releases/download/v$ccVersion/$ccAsset"
     Write-Step "下载 $ccUrl..."
     Invoke-WebRequest -Uri $ccUrl -OutFile $ccPath -TimeoutSec 600 -UseBasicParsing
 }
+# 换版本清旧
+Get-ChildItem $ccDir -Filter 'cc-pocket-daemon-*-linux-x86_64.tar.gz' -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -ne $ccAsset } |
+    Remove-Item -Force -ErrorAction SilentlyContinue
+
 $ccShaPath = Join-Path $ccDir 'SHA256SUMS'
 # 从 sums 文件里取该 tarball 的期望哈希(兼容 * 二进制模式前缀),无文件/无条目返 $null
 function Get-ExpectedCcHash {
@@ -248,7 +361,215 @@ if ($expectedHash -ne $actualHash) {
 Write-Ok "cc-pocket SHA256 校验通过"
 Write-Ok "cc-pocket bundle 就绪:$ccAsset"
 
-# ---------- 4. 状态汇总 ----------
+# ---------- 4. 可选开发环境组件(JDK 17 / Maven / uv / pnpm)----------
+# 与核心三件同构的版本菜单,差别:非交互且无缓存 → 跳过不下载(可选件不自动下大包,
+# 要装就在交互终端跑一次本脚本)。镜像刻意选国内源:Adoptium/uv 官方都在 GitHub(常不可达)。
+
+# 可选件下载(TLS1.2;失败 warn 不退出——留给下次重跑或 start 在线兜底)
+function Save-OptionalFile {
+    param([string]$Url, [string]$OutPath, [string]$Label)
+    New-Item -ItemType Directory -Path (Split-Path $OutPath) -Force | Out-Null
+    Write-Step "下载 $Url..."
+    $proto = [System.Net.ServicePointManager]::SecurityProtocol
+    [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
+    try {
+        Invoke-WebRequest -Uri $Url -OutFile $OutPath -TimeoutSec 900 -UseBasicParsing
+        $size = [math]::Round((Get-Item $OutPath).Length / 1MB, 1)
+        Write-Ok "$Label 下载完成:$(Split-Path $OutPath -Leaf) ($size MB)"
+        return $true
+    } catch {
+        Write-Warn "$Label 下载失败:$($_.Exception.Message)(已跳过;重跑再试或交互选其它版本)"
+        if (Test-Path $OutPath) { Remove-Item $OutPath -Force -ErrorAction SilentlyContinue }
+        return $false
+    } finally {
+        [System.Net.ServicePointManager]::SecurityProtocol = $proto
+    }
+}
+
+# 可选件版本选择:返回 "cached:<ver>" / "skip" / 版本串(含手动输入)。
+# 非交互:有缓存保持缓存,无缓存跳过(交互才弹菜单;默认项 = 首项)
+function Select-OptionalComponentVersion {
+    param([string]$Prompt, [string]$CachedVer, [string[]]$Recent = @(), [string]$ManualPattern, [string]$ManualExample)
+    if (-not $interactive) {
+        if ($CachedVer) { return "cached:$CachedVer" }
+        return 'skip'
+    }
+    $choices = @()
+    if ($CachedVer) { $choices += @{ Label = "保持缓存版本 $CachedVer(不重新下载)"; Ver = "cached:$CachedVer" } }
+    $choices += @{ Label = '跳过(本次不装/不更新)'; Ver = 'skip' }
+    foreach ($v in ($Recent | Where-Object { $_ -ne $CachedVer })) { $choices += @{ Label = "$v"; Ver = $v } }
+    $choices += @{ Label = '手动输入版本号'; Ver = 'manual' }
+    $labels = @($choices | ForEach-Object { $_.Label })
+    $i = Select-SingleChoice -Options $labels -DefaultIndex 0 -Prompt $Prompt
+    $pick = $choices[$i].Ver
+    if ($pick -eq 'manual') {
+        while ($true) {
+            # Read-Host 异常兜底:同 Select-SingleChoice(见 feature-menu.ps1)
+            try { $v = Read-Host "输入版本(如 $ManualExample)" } catch { $v = $null }
+            $v = if ($null -ne $v) { "$v".Trim() } else { '' }
+            if ($v -match $ManualPattern) { return $v }
+            Write-Warn "格式不符(应为形如 $ManualExample),当前输入: $v"
+        }
+    }
+    return $pick
+}
+
+# --- JDK 17(Adoptium Temurin tarball,清华镜像;~190MB)---
+$jdkDir = Join-Path $bundleDir 'jdk'
+$tunaJdkBase = 'https://mirrors.tuna.tsinghua.edu.cn/Adoptium/17/jdk/x64/linux'
+$cachedJdk = Get-ChildItem $jdkDir -Filter 'OpenJDK17U-jdk_x64_linux_hotspot_*.tar.gz' -ErrorAction SilentlyContinue | Select-Object -First 1
+$cachedJdkVer = $null
+if ($cachedJdk -and $cachedJdk.Name -match 'hotspot_(\d+(?:\.\d+)+)_(\d+)\.tar\.gz') { $cachedJdkVer = "$($Matches[1])+$($Matches[2])" }
+
+if ((-not $Force) -and $cachedJdk) {
+    Write-Ok "JDK 17 已缓存:$($cachedJdk.Name)(用 -Force 重选/重下)"
+} else {
+    $recentJdk = @()
+    if ($interactive) {
+        try {
+            $html = (Invoke-WebRequest -Uri "$tunaJdkBase/" -TimeoutSec 30 -UseBasicParsing).Content
+            $recentJdk = @([regex]::Matches($html, 'OpenJDK17U-jdk_x64_linux_hotspot_(\d+(?:\.\d+)+)_(\d+)\.tar\.gz') |
+                ForEach-Object { "$($_.Groups[1].Value)+$($_.Groups[2].Value)" } |
+                Sort-Object -Property @{ e = { [version]($_ -split '\+')[0] } }, @{ e = { [int]($_ -split '\+')[1] } } -Descending |
+                Select-Object -Unique -First 5)
+        } catch { Write-Warn "拉取 JDK 版本列表失败(离线?):$($_.Exception.Message)" }
+    }
+    $pick = Select-OptionalComponentVersion -Prompt 'JDK 17(Adoptium,清华镜像)' -CachedVer $cachedJdkVer -Recent $recentJdk -ManualPattern '^\d+(\.\d+)+\+\d+$' -ManualExample '17.0.20.1+1'
+    if ($pick -like 'cached:*') {
+        Write-Ok "JDK 17 沿用缓存 $($pick.Split(':', 2)[1])"
+    } elseif ($pick -eq 'skip') {
+        Write-Host '    --  JDK 17:跳过(未缓存;start 勾选 dev-java 时在线兜底)' -ForegroundColor DarkGray
+    } else {
+        $file = "OpenJDK17U-jdk_x64_linux_hotspot_$($pick -replace '\+', '_').tar.gz"
+        if (Save-OptionalFile -Url "$tunaJdkBase/$file" -OutPath (Join-Path $jdkDir $file) -Label 'JDK 17') {
+            Get-ChildItem $jdkDir -Filter 'OpenJDK17U-*.tar.gz' -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -ne $file } | Remove-Item -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+# --- Maven(bin tarball,阿里云 apache 镜像;~9MB;镜像只留各系列最新,旧版本用手动+archive)---
+$mvnDir = Join-Path $bundleDir 'maven'
+$aliyunMvnBase = 'https://mirrors.aliyun.com/apache/maven/maven-3'
+$cachedMvn = Get-ChildItem $mvnDir -Filter 'apache-maven-*-bin.tar.gz' -ErrorAction SilentlyContinue | Select-Object -First 1
+$cachedMvnVer = $null
+if ($cachedMvn -and $cachedMvn.Name -match '^apache-maven-(\d+\.\d+\.\d+)-bin\.tar\.gz$') { $cachedMvnVer = $Matches[1] }
+
+if ((-not $Force) -and $cachedMvn) {
+    Write-Ok "Maven 已缓存:$($cachedMvn.Name)(用 -Force 重选/重下)"
+} else {
+    $recentMvn = @()
+    if ($interactive) {
+        try {
+            $html = (Invoke-WebRequest -Uri "$aliyunMvnBase/" -TimeoutSec 30 -UseBasicParsing).Content
+            $recentMvn = @([regex]::Matches($html, '(\d+\.\d+\.\d+)/') | ForEach-Object { $_.Groups[1].Value } |
+                Sort-Object -Property { [version]$_ } -Descending | Select-Object -Unique -First 5)
+        } catch { Write-Warn "拉取 Maven 版本列表失败(离线?):$($_.Exception.Message)" }
+    }
+    $pick = Select-OptionalComponentVersion -Prompt 'Maven(阿里云镜像)' -CachedVer $cachedMvnVer -Recent $recentMvn -ManualPattern '^\d+\.\d+\.\d+$' -ManualExample '3.9.16'
+    if ($pick -like 'cached:*') {
+        Write-Ok "Maven 沿用缓存 $($pick.Split(':', 2)[1])"
+    } elseif ($pick -eq 'skip') {
+        Write-Host '    --  Maven:跳过(未缓存;start 勾选 dev-java 时在线兜底)' -ForegroundColor DarkGray
+    } else {
+        $file = "apache-maven-$pick-bin.tar.gz"
+        if (Save-OptionalFile -Url "$aliyunMvnBase/$pick/binaries/$file" -OutPath (Join-Path $mvnDir $file) -Label 'Maven') {
+            Get-ChildItem $mvnDir -Filter 'apache-maven-*-bin.tar.gz' -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -ne $file } | Remove-Item -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+# --- uv(PyPI wheel,清华镜像;~35MB;VM 内解出二进制)---
+$uvDir = Join-Path $bundleDir 'uv'
+$tunaPypiJson = 'https://pypi.tuna.tsinghua.edu.cn/pypi/uv/json'
+$cachedUv = Get-ChildItem $uvDir -Filter 'uv-*.whl' -ErrorAction SilentlyContinue | Select-Object -First 1
+$cachedUvVer = $null
+if ($cachedUv -and $cachedUv.Name -match '^uv-(\d+\.\d+\.\d+)-') { $cachedUvVer = $Matches[1] }
+
+if ((-not $Force) -and $cachedUv) {
+    Write-Ok "uv 已缓存:$($cachedUv.Name)(用 -Force 重选/重下)"
+} else {
+    $uvJson = $null
+    $recentUv = @()
+    if ($interactive) {
+        try {
+            $uvJson = Invoke-RestMethod -Uri $tunaPypiJson -TimeoutSec 30
+            $recentUv = @($uvJson.releases.PSObject.Properties.Name |
+                Where-Object { $_ -notmatch '[a-zA-Z]' } |
+                Sort-Object -Property { [version]$_ } -Descending | Select-Object -First 5)
+        } catch { Write-Warn "拉取 uv 版本列表失败(离线?):$($_.Exception.Message)" }
+    }
+    $pick = Select-OptionalComponentVersion -Prompt 'uv(清华 PyPI 镜像)' -CachedVer $cachedUvVer -Recent $recentUv -ManualPattern '^\d+\.\d+\.\d+$' -ManualExample '0.8.6'
+    if ($pick -like 'cached:*') {
+        Write-Ok "uv 沿用缓存 $($pick.Split(':', 2)[1])"
+    } elseif ($pick -eq 'skip') {
+        Write-Host '    --  uv:跳过(未缓存;start 勾选 dev-python 时在线兜底)' -ForegroundColor DarkGray
+    } else {
+        # 版本 → manylinux x86_64 wheel 的直链(tuna 与 pythonhosted 路径结构一致,换前缀即可)
+        $uvUrl = $null; $uvFile = $null
+        try {
+            if (-not $uvJson) { $uvJson = Invoke-RestMethod -Uri $tunaPypiJson -TimeoutSec 30 }
+            $rel = $uvJson.releases.PSObject.Properties[$pick].Value
+            $asset = @($rel) | Where-Object { $_.filename -match '^uv-.*-py3-none-manylinux.*x86_64.*\.whl$' } | Select-Object -First 1
+            if ($asset) {
+                $uvFile = $asset.filename
+                $uvUrl = ($asset.url -replace '^https?://[^/]+', 'https://pypi.tuna.tsinghua.edu.cn')
+            }
+        } catch { Write-Warn "解析 uv $pick 的 wheel 下载地址失败:$($_.Exception.Message)" }
+        if ($uvUrl) {
+            if (Save-OptionalFile -Url $uvUrl -OutPath (Join-Path $uvDir $uvFile) -Label 'uv') {
+                Get-ChildItem $uvDir -Filter 'uv-*.whl' -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Name -ne $uvFile } | Remove-Item -Force -ErrorAction SilentlyContinue
+            }
+        } else {
+            Write-Warn "uv $pick 没有 manylinux x86_64 wheel(奇怪),已跳过"
+        }
+    }
+}
+
+# --- pnpm(npm pack 本地打包,与 Claude Code 同路数;~9MB)---
+$pnpmDir = Join-Path $bundleDir 'pnpm'
+$cachedPnpm = Get-ChildItem $pnpmDir -Filter 'pnpm-*.tgz' -ErrorAction SilentlyContinue | Select-Object -First 1
+$cachedPnpmVer = $null
+if ($cachedPnpm -and $cachedPnpm.Name -match '^pnpm-(\d+\.\d+\.\d+)\.tgz$') { $cachedPnpmVer = $Matches[1] }
+
+if ((-not $Force) -and $cachedPnpm) {
+    Write-Ok "pnpm 已缓存:$($cachedPnpm.Name)(用 -Force 重选/重下)"
+} else {
+    $recentPnpm = @()
+    if ($interactive) {
+        try {
+            $npmCmd = (Get-Command npm.cmd -ErrorAction SilentlyContinue).Source
+            if (-not $npmCmd) { throw 'npm.cmd 不在 PATH' }
+            $out = & $npmCmd view pnpm versions --json 2>$null
+            # PS 5.1 多行 JSON 坑:必须先 -join 回整段再 ConvertFrom-Json(详见 Claude Code 段注释)
+            $vers = ConvertFrom-Json ($out -join "`n")
+            # 只列 10.x:pnpm 11.x 需 Node≥22,bundle 的 Node 锁 20.x(要升 11 得连 Node 一起换)
+            $recentPnpm = @($vers | Where-Object { "$_" -match '^10\.' -and "$_" -notmatch '-' } | Select-Object -Last 5)
+            [array]::Reverse($recentPnpm)
+        } catch { Write-Warn "拉取 pnpm 版本列表失败(离线?):$($_.Exception.Message)" }
+    }
+    $pick = Select-OptionalComponentVersion -Prompt 'pnpm 10 系(npm pack;11.x 需 Node 22 不兼容)' -CachedVer $cachedPnpmVer -Recent $recentPnpm -ManualPattern '^\d+\.\d+\.\d+$' -ManualExample '10.15.0'
+    if ($pick -like 'cached:*') {
+        Write-Ok "pnpm 沿用缓存 $($pick.Split(':', 2)[1])"
+    } elseif ($pick -eq 'skip') {
+        Write-Host '    --  pnpm:跳过(未缓存;start 勾选 dev-frontend 时在线兜底)' -ForegroundColor DarkGray
+    } else {
+        try {
+            $packed = Invoke-NpmPack -Pkg "pnpm@$pick"
+            New-Item -ItemType Directory -Path $pnpmDir -Force | Out-Null
+            Move-Item $packed (Join-Path $pnpmDir (Split-Path $packed -Leaf)) -Force
+            Get-ChildItem $pnpmDir -Filter 'pnpm-*.tgz' | Where-Object { $_.Name -ne (Split-Path $packed -Leaf) } |
+                Remove-Item -Force -ErrorAction SilentlyContinue
+            Write-Ok "pnpm 打包完成:$(Split-Path $packed -Leaf)"
+        } catch {
+            Write-Warn "pnpm 打包失败:$($_.Exception.Message)(已跳过)"
+        }
+    }
+}
+
+# ---------- 5. 状态汇总 ----------
 Write-Step "bundle 状态:"
 $nodeOk   = Get-ChildItem $bundleDir -Filter 'node-v*-linux-x64.tar.xz' -ErrorAction SilentlyContinue | Select-Object -First 1
 $wrapOk   = Get-ChildItem $bundleDir -Filter $wrapperPattern -ErrorAction SilentlyContinue |
@@ -262,9 +583,21 @@ if ($linuxOk) { Write-Ok "Claude Linux 二进制:$($linuxOk.Name)" } else { Writ
 $ccOk = @(Get-ChildItem (Join-Path $bundleDir 'cc-pocket') -Filter 'cc-pocket-daemon-*-linux-x86_64.tar.gz' -ErrorAction SilentlyContinue).Count -gt 0
 if ($ccOk) { Write-Ok "cc-pocket:        已准备" } else { Write-Err "cc-pocket:        缺" }
 
+# 可选开发环境组件:缺了不算失败(交互终端重跑本脚本选装;start 勾选时在线兜底)
+foreach ($opt in @(
+    @{ Name = 'JDK 17'; Dir = 'jdk';   Pat = 'OpenJDK17U-jdk_x64_linux_hotspot_*.tar.gz' },
+    @{ Name = 'Maven';  Dir = 'maven'; Pat = 'apache-maven-*-bin.tar.gz' },
+    @{ Name = 'uv';     Dir = 'uv';    Pat = 'uv-*.whl' },
+    @{ Name = 'pnpm';   Dir = 'pnpm';  Pat = 'pnpm-*.tgz' }
+)) {
+    $f = Get-ChildItem (Join-Path $bundleDir $opt.Dir) -Filter $opt.Pat -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($f) { Write-Ok "$($opt.Name):$($f.Name)" }
+    else    { Write-Host "    --  $($opt.Name):未缓存(可选)" -ForegroundColor DarkGray }
+}
+
 if ($nodeOk -and $wrapOk -and $linuxOk -and $ccOk) {
-    $totalMB = [math]::Round(($nodeOk.Length + $wrapOk.Length + $linuxOk.Length + (Get-ChildItem (Join-Path $bundleDir 'cc-pocket') -File | Measure-Object Length -Sum).Sum) / 1MB, 1)
-    Write-Host "bundle 就绪($totalMB MB,含 cc-pocket)。" -ForegroundColor Green
+    $totalMB = [math]::Round(((Get-ChildItem $bundleDir -Recurse -File | Measure-Object Length -Sum).Sum) / 1MB, 1)
+    Write-Host "bundle 就绪($totalMB MB,含可选件)。" -ForegroundColor Green
     exit 0
 } else {
     Write-Host ""
