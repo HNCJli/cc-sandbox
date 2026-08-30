@@ -4,7 +4,7 @@
 # 可用特性 id(见 scripts\launch.ps1 的 $optionalFeatures):
 #   tailscale   跨网络直连 VM 上的服务(公司机器别开,会被软件审计识别)
 #   path-map    VM 里 Claude Code 自动把对话里的宿主机 Windows 路径换算成挂载点路径
-#   clip-bridge 宿主机截图 → VM 里 Claude Code Ctrl+V 直接粘图(非重建型,勾上即生效)
+#   clip-bridge 宿主机截图 → VM 里 Claude Code Ctrl+Shift+V 粘图,Ctrl+V 留给文本粘贴(非重建型,勾上即生效)
 #   dev-java    VM 预装 JDK 17 + Maven(非重建型;离线 bundle 秒装,缺件回退在线 apt)
 #   dev-python  VM 预装 python3 + uv(非重建型;离线 bundle 秒装,uv 全包 venv/依赖)
 #   dev-frontend VM 预装 pnpm(非重建型;离线 bundle 优先,Node 20 已是基础件)

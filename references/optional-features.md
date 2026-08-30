@@ -16,21 +16,22 @@ VM 里的 Claude Code 按表换算成 `/home/ubuntu/workspace/share-dir-01/test-
 
 ## 剪贴板图片粘贴(clip-bridge)
 
-宿主机截图后,**VM 里的 Claude Code 直接按 Ctrl+V 就能粘图**,体验与本机跑 claude 一致——发报错截图、设计稿、UI 图不用再存文件传路径。
+宿主机截图后,**VM 里的 Claude Code 按 `Ctrl+Shift+V` 粘图**;`Ctrl+V` 保持终端原生文本粘贴(claude 输入框、shell、本地都一样)——一个键管图、一个键管文。
 
 原理(参考 cc-clip 的拦截协议,宿主机零额外安装,纯 Windows 内置能力):
 
 - 宿主侧:`start` 拉起一个 PowerShell 常驻服务(`scripts\clip-bridge\host-daemon.ps1`,监听 `127.0.0.1:18339`,按需读 Windows 剪贴板;PID 在状态目录 `.clip-daemon.pid`,日志 `clip-daemon.log`)
 - 隧道:`start` 起一条**专享** SSH 反向隧道(`-R 18339`,`.clip-tunnel.pid`),与 LLM 隧道相互独立——直连模式(公网 base_url)下桥也照常工作
 - VM 侧:垫片装在 `/usr/local/bin/xclip`、`/usr/local/bin/wl-paste`(PATH 恒优先于 `/usr/bin`)。Claude Code 在 Linux 上读剪贴板就是调这两个命令,垫片把请求经隧道 curl 到宿主 daemon
+- **claude 键位**:"Ctrl+Shift+V 粘图"是改绑出来的——`start` 在 `~/.claude/keybindings.json` **不存在时**自动写入 `ctrl+shift+v → chat:imagePaste`;文件已存在则不动(避免覆盖自定义键位),缺绑定时粘图键无反应,按 troubleshooting.md §G 手工补
 
 使用要点:
 
 - **入口不限**:`multipass shell claude-dev` 或 `ssh claude-dev` 进去都能粘——垫片打的是 VM 回环,不依赖你自己的会话带隧道
 - **非重建型**:勾上后现有 VM 下次 `start` 即生效,不需要 delete + start
-- 取消勾选:下次 `start` 自动停 daemon 和隧道(恢复无桥行为;多台 VM 下其他 VM 还勾着 clip-bridge 时,daemon 会保留);VM 里的垫片文件保留但无害(桥不通时它透传/失败退出,与没装过等价),想彻底清除可 `sudo rm /usr/local/bin/xclip /usr/local/bin/wl-paste` 或 delete + start 重建
-- 粘贴**文本**不受影响(文本走终端通道);桥只服务"Claude Code 主动读剪贴板"这个动作(图片为主,文本读取也顺带打通)
-- **终端快捷键坑(实测 2026-08-23)**:多数终端默认占用 `Ctrl+V` 当"粘贴文本",按键到不了 claude,粘图表现为"没反应"。Warp:设置 → Keyboard Shortcuts 搜 `paste`,清空 **Alternate Terminal Paste** 上的 Ctrl+V 绑定(Paste 本身是 Ctrl+Shift+V,保留);Windows Terminal:设置 → 操作 → 删除"粘贴 Ctrl+V"。详见 troubleshooting.md §G
+- 取消勾选:下次 `start` 自动停 daemon 和隧道(恢复无桥行为;多台 VM 下其他 VM 还勾着 clip-bridge 时,daemon 会保留);VM 里的垫片与 `~/.claude/keybindings.json` 保留但无害(桥不通时垫片透传/失败退出,键位只影响 Ctrl+Shift+V,与没装过等价),想彻底清除可 `sudo rm /usr/local/bin/xclip /usr/local/bin/wl-paste`、删掉 keybindings.json,或 delete + start 重建
+- 粘贴**文本**走 `Ctrl+V`(终端原生粘贴,claude 输入框 / shell / 本地一致);桥只服务"图粘贴"这一个动作(claude 收到 `Ctrl+Shift+V` 才读剪贴板)
+- **终端快捷键前置(实测 2026-08-23)**:粘图键 `Ctrl+Shift+V` 必须能穿透终端到达 claude。Warp:设置 → Keyboard Shortcuts 搜 `paste`,把 **Paste** 从 Ctrl+Shift+V **改绑到 Ctrl+V**(**Alternate Terminal Paste** 保持清空);Windows Terminal:设置 → 操作 → 删除"粘贴 · Ctrl+Shift+V"(保留 Ctrl+V)。改完后 `Ctrl+V`=文本粘贴、`Ctrl+Shift+V`=claude 粘图。详见 troubleshooting.md §G
 - 体检:`.\scripts\launch.ps1 status` 的"剪贴板桥"段显示 daemon / 桥隧道 / VM→宿主端到端三项状态
 - 出问题看日志 `%USERPROFILE%\.cc-sandbox\clip-daemon.log`;端到端没通多半是隧道没起好,重跑 `start` 自愈
 - 注意:桥只负责**把图送进 Claude Code**;模型能不能真"看见"图,取决于当时接的 LLM 后端是否支持/透传 image 块(部分中转网关会丢 tool_result 里的图片,与桥无关)

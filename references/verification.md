@@ -348,10 +348,12 @@ multipass exec claude-dev -- bash -lc '/usr/local/bin/wl-paste --list-types'
 .\scripts\launch.ps1 status
 # 预期:"剪贴板桥"段显示未启用;宿主机上 daemon 进程已退出
 
-# (g) 真人端到端:记事本写 HELLO-9527 → Win+Shift+S 截图 → VM 里 claude 按 Ctrl+V
+# (g) 真人端到端:记事本写 HELLO-9527 → Win+Shift+S 截图 → VM 里 claude 按 Ctrl+Shift+V
 #     → 问"图里写了什么数字" → 应答出 9527
-#     前置:所用终端没占用 Ctrl+V(Warp 实测占用者是 Alternate Terminal Paste,
-#     见 troubleshooting.md §G);Ctrl+V 没反应先按 §G 判别终端拦截
+#     前置:终端把"粘贴文本"绑在 Ctrl+V 且 Ctrl+Shift+V 空闲(Warp:Paste 改绑 Ctrl+V,
+#     Alternate Terminal Paste 保持清空;见 troubleshooting.md §G);
+#     VM 里 ~/.claude/keybindings.json 含 ctrl+shift+v → chat:imagePaste(start 自动写)
+#     附带回归:复制文字在 claude 输入框按 Ctrl+V,文本应正常粘贴
 ```
 
 ### 预期汇总

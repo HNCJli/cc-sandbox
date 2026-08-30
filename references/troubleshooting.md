@@ -300,25 +300,43 @@ multipass list
 
 若强制结束服务进程后仍无法启动服务,或 `multipass list` 仍卡住,重启 Windows 后再验证 `multipass list`;恢复前不要 delete/rebuild VM。
 
-## §G 剪贴板桥:claude 里 Ctrl+V 没反应 / 粘图失败
+## §G 剪贴板桥:claude 里 Ctrl+Shift+V 粘不了图
 
-**现象**:status 的"剪贴板桥"三件套全绿,但 VM 里 claude 输入框按 Ctrl+V 完全没反应(连附件标记都不出现)。
+快捷键约定:**Ctrl+V = 终端原生文本粘贴**(claude 输入框 / shell / 本地都一样),**Ctrl+Shift+V = claude 粘图**(改绑出来的键位,由 clip-bridge 启用时写入)。
 
-**最常见根因:终端自己吃掉了 Ctrl+V**。多数终端默认把 `Ctrl+V` 绑定为"粘贴文本"——按键被终端消费,从未到达 claude;而剪贴板里是图片(终端粘不了图),于是"什么都没发生"。
+**现象**:status 的"剪贴板桥"三件套全绿,但 VM 里 claude 输入框按 Ctrl+Shift+V 没反应(连附件标记都不出现)。
+
+**根因 1(最常见):终端把 Ctrl+Shift+V 占作"粘贴文本"**——按键被终端消费,从未到达 claude;剪贴板里是图片(终端粘不了图),于是"什么都没发生"。
+
+**根因 2:claude 键位没到位**——`~/.claude/keybindings.json` 缺失或没含 `ctrl+shift+v → chat:imagePaste`(start 只在该文件不存在时写入,自定义过就不会动)。
 
 **30 秒判别**:宿主机复制一段**文字** → claude 输入框按 `Ctrl+V`:
 
-- 文字被敲进输入框 → 实锤终端拦截,按下表解绑
-- 无任何反应 → 跳到下面的三层排查
+- 文字被敲进输入框 → 终端文本粘贴链路 OK(这就是日常文本粘贴);再按 `Ctrl+Shift+V` 粘图仍没反应 → 根因 2,看下面"键位缺失时手工补"
+- Ctrl+V 也没反应 → 终端把 Ctrl+V 也没绑到粘贴,按下表改绑
 
-**解绑 Ctrl+V(实测 2026-08-23)**:
+**终端快捷键改绑(实测 2026-08-23;目标:Ctrl+V=终端文本粘贴,Ctrl+Shift+V=空闲穿透到 claude)**:
 
 | 终端 | 操作 |
 |---|---|
-| **Warp** | `Ctrl+,`(Ctrl 和逗号)→ Keyboard Shortcuts → 搜 `paste` → 占着 `Ctrl+V` 的是 **Alternate Terminal Paste**(实测如此,Paste 本身绑的是 Ctrl+Shift+V)→ 点该按键块,按 Backspace 清空。粘文本继续用 `Ctrl+Shift+V` |
-| Windows Terminal | `Ctrl+,` → 操作(Actions)→ 删除"粘贴 · Ctrl+V" → 粘文本用 Ctrl+Shift+V 或右键 |
+| **Warp** | `Ctrl+,`(Ctrl 和逗号)→ Keyboard Shortcuts → 搜 `paste` → 把 **Paste** 的按键从 Ctrl+Shift+V 改成 **Ctrl+V**;**Alternate Terminal Paste** 保持清空(占着 Ctrl+V/Ctrl+Shift+V 就 Backspace 清掉) |
+| Windows Terminal | `Ctrl+,` → 操作(Actions)→ 保留"粘贴 · Ctrl+V",删除"粘贴 · Ctrl+Shift+V" |
 
-设置即时生效,不用重启终端,claude 里直接再按 Ctrl+V 验证。
+设置即时生效,不用重启终端,claude 里直接再按 Ctrl+Shift+V 验证。
+
+**键位缺失时手工补**(VM 内;start 只在文件不存在时写,自定义过该文件的在此对齐):
+
+```bash
+mkdir -p ~/.claude && cat > ~/.claude/keybindings.json <<'EOF'
+{
+  "bindings": [
+    { "context": "Chat", "bindings": { "ctrl+shift+v": "chat:imagePaste" } }
+  ]
+}
+EOF
+```
+
+已有自定义 keybindings.json 就把 `"ctrl+shift+v": "chat:imagePaste"` 加进 Chat 上下文的 bindings,别整文件覆盖。
 
 **不是终端拦截时的三层排查**(宿主机 PowerShell 逐条,哪层挂修哪层):
 

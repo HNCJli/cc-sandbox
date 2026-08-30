@@ -99,7 +99,7 @@ opencode        # 另一个预装的 AI 编码 agent,LLM 配置与 claude 同源
 
 **贴宿主机路径**:勾选了"路径映射记忆"特性时,VM 里 Claude Code 的全局记忆(`~/.claude/CLAUDE.md`)带宿主机↔VM 路径映射表,对话里直接贴 Windows 路径(如 `D:\...\share-dir-01\test-project\.gitignore`),它会自动换算成挂载点路径(`/home/ubuntu/workspace/share-dir-01/test-project/.gitignore`)再操作。
 
-**贴图**:勾选了"剪贴板图片粘贴"特性时,宿主机截图后 VM 里 Claude Code 直接按 Ctrl+V 粘贴。桥由 start 自动拉起(宿主 PowerShell 常驻服务 + 专享反向隧道 + VM 垫片),`multipass shell` / `ssh` 进 VM 均可,详见 [references/optional-features.md](references/optional-features.md)。
+**贴图**:勾选了"剪贴板图片粘贴"特性时,宿主机截图后 VM 里 Claude Code 按 `Ctrl+Shift+V` 粘贴(`Ctrl+V` 保持终端原生文本粘贴;claude 键位由 start 自动写入 `~/.claude/keybindings.json`)。桥由 start 自动拉起(宿主 PowerShell 常驻服务 + 专享反向隧道 + VM 垫片),`multipass shell` / `ssh` 进 VM 均可,详见 [references/optional-features.md](references/optional-features.md)。
 
 ### cc-pocket(可选,手机遥控)
 
@@ -145,7 +145,7 @@ systemctl --user enable --now cc-pocket-daemon
 | VM 里 env 检查是 `EMPTY`,或 `claude` 弹登录菜单 | §C 宿主机 .claude 权限锁死,env 同步为空 |
 | `bash: *** fatal error - add_item ... errno 1` | §D Git Bash spawn bug(与 VM 无关) |
 | SSH 隧道秒退 / 端口探测 000 | §E 隧道;ExitCode 255 + `UNPROTECTED PRIVATE KEY FILE` 见 §E.1 |
-| VM 里 claude 粘图没反应(附件都不出现) | §G 终端占用 Ctrl+V,先解绑再查桥;附件出现但模型看不见图 = 网关丢 image 块 |
+| VM 里 claude 粘图没反应(附件都不出现) | §G:多半是终端占了 Ctrl+Shift+V 或 claude 键位没写入;附件出现但模型看不见图 = 网关丢 image 块 |
 | 挂载失败 / 非 ASCII 路径 | 见 references/troubleshooting.md 挂载章节 |
 
 **注意**:§A(镜像源)和 §C(权限)这两类问题**不是每台机器都有**——只在遇到对应报错时才处理,别在正常机器上预防性乱改全局设置或文件权限。

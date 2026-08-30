@@ -142,9 +142,9 @@ $optionalFeatures = @(
         Id          = 'clip-bridge'
         Name        = '剪贴板图片粘贴'
         RebuildOnly = $false   # 非重建型:每次 start 拉起宿主 daemon + 部署 VM 垫片 + 起专享反向隧道,现有 VM 立即生效
-        Description = '宿主机截图 → VM 里 Claude Code Ctrl+V 直接粘图(PowerShell 常驻服务 + 专享 SSH 反向隧道;multipass shell / ssh 进 VM 均可)'
+        Description = '宿主机截图 → VM 里 Claude Code Ctrl+Shift+V 粘图;Ctrl+V 留给终端文本粘贴(PowerShell 常驻服务 + 专享 SSH 反向隧道;multipass shell / ssh 进 VM 均可)'
         Probe       = 'grep -q cc-sandbox /usr/local/bin/xclip 2>/dev/null'
-        FinishHint  = '剪贴板桥:  宿主机截图 → VM 里 claude 按 Ctrl+V 粘图(multipass shell / ssh 进 VM 均可)'
+        FinishHint  = '剪贴板桥:  宿主机截图 → VM 里 claude 按 Ctrl+Shift+V 粘图;Ctrl+V=文本粘贴(multipass shell / ssh 进 VM 均可)'
     }
     @{
         Id          = 'dev-java'
@@ -1358,6 +1358,27 @@ function Start-ClipBridge {
         }
     }
     Write-Ok "垫片已装(/usr/local/bin/xclip、wl-paste)"
+
+    # 2b) claude 键位:粘图改绑 Ctrl+Shift+V(终端层把 Ctrl+V 让给文本粘贴,方案见 troubleshooting §G)。
+    #     只在 ~/.claude/keybindings.json 不存在时写入;文件已存在(含用户自定义)保持不动
+    $kbJson = Join-Path $bridgeDir 'vm-keybindings.json'
+    if (Test-Path $kbJson) {
+        $kbTransfer = Invoke-Multipass -ArgumentList @('transfer', $kbJson, "${vmName}:/tmp/cc-sandbox-kb.json") -TimeoutSec 30
+        if ($kbTransfer.TimedOut -or $kbTransfer.ExitCode -ne 0) {
+            Write-Warn "键位模板传入 VM 失败(不影响剪贴板桥其余部分)"
+        } else {
+            $kbCmd = 'test -e ~/.claude/keybindings.json && echo KB_EXISTS || (mkdir -p ~/.claude && install -m 0644 /tmp/cc-sandbox-kb.json ~/.claude/keybindings.json && echo KB_WRITTEN); rm -f /tmp/cc-sandbox-kb.json'
+            $kbRun = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'bash', '-c', $kbCmd) -TimeoutSec 30
+            if ($kbRun.TimedOut -or $kbRun.ExitCode -ne 0) {
+                $err = if ($kbRun.TimedOut) { "超时" } elseif ($kbRun.Stderr) { $kbRun.Stderr.Trim() } else { "(无 stderr)" }
+                Write-Warn "claude 键位写入失败:$err(不影响剪贴板桥其余部分)"
+            } elseif ("$($kbRun.Stdout)" -match 'KB_WRITTEN') {
+                Write-Ok "claude 粘图键位已写入 ~/.claude/keybindings.json(Ctrl+Shift+V 粘图)"
+            } elseif ("$($kbRun.Stdout)" -match 'KB_EXISTS') {
+                Write-Ok "~/.claude/keybindings.json 已存在,保持不动(若无 Ctrl+Shift+V 粘图键位,参考 troubleshooting.md §G 手工补)"
+            }
+        }
+    }
 
     # 3) 专享反向隧道(独立 pidfile .clip-tunnel.pid;不设 ExitOnForwardFailure——失败多半是
     #    VM 侧端口被残留会话占,隧道进程仍可用于下次;端到端检查会如实暴露)
