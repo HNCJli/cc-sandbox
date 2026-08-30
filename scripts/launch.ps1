@@ -3,15 +3,17 @@
     claude-dev VM lifecycle manager.
     Usage:
         .\scripts\launch.ps1 start      # 创建/启动 VM + 挂载 + SSH 反向隧道(默认 VM 名 claude-dev)
-                                       # (真人终端裸跑会弹"可选特性"多选菜单,回车=保持上次选择;
-                                       #  管道/后台/重定向 stdin 时自动跳过菜单,读 features.txt)
-        .\scripts\launch.ps1 stop       # 停隧道 + 停 VM
-        .\scripts\launch.ps1 status     # 多台受管 VM 时给总览;单台时给详情
-        .\scripts\launch.ps1 delete     # 删 VM + 清理(状态目录配置保留)
+                                       # (真人终端裸跑:先弹"选择 VM"单选菜单——受管 VM 列表 +
+                                       #  "+ 新建 VM…"(回车=上次使用;选新建则现场填名字和挂载目录),
+                                       #  再弹"可选特性"多选菜单,回车=保持上次选择;
+                                       #  管道/后台/重定向 stdin 时两个菜单都跳过,用 claude-dev 或 -Name)
+        .\scripts\launch.ps1 stop       # 停隧道 + 停 VM(受管 VM 多于一台时弹菜单选)
+        .\scripts\launch.ps1 status     # 多台时:交互弹菜单选台看详情(菜单即总览)/非交互给总览;单台直接详情
+        .\scripts\launch.ps1 delete     # 删 VM + 清理(状态目录配置保留;多台时弹菜单选)
 
-    多 VM:所有子命令支持 -Name <名字>(如 .\scripts\launch.ps1 start -Name dev-java),
-    不带 -Name 操作默认 VM claude-dev。状态按 VM 分目录(%USERPROFILE%\.cc-sandbox\<名字>\),
-    共享件(bundle 离线包、.ssh-key、剪贴板桥 daemon)在根目录;每台默认 4C/8G/30G,多开自己算家底。
+    多 VM:交互终端在 start 菜单里选台/建台,不用记参数;-Name 保留给脚本与非交互场景。
+    状态按 VM 分目录(%USERPROFILE%\.cc-sandbox\<名字>\),共享件(bundle 离线包、.ssh-key、
+    剪贴板桥 daemon)在根目录;每台默认 4C/8G/30G,多开自己算家底。
 
     可写状态固定在 %USERPROFILE%\.cc-sandbox(写死,不提供参数/环境变量更换)。
 #>
@@ -21,7 +23,7 @@ param(
     [ValidateSet("start", "stop", "status", "delete")]
     [string]$Action = "start",
 
-    # VM 名(多 VM):所有子命令可用;不带 = 默认 claude-dev
+    # VM 名(多 VM):脚本/非交互场景用;交互终端走选择菜单(start 每次弹,回车=上次使用,菜单里可新建)
     [ValidatePattern('^[a-z0-9][a-z0-9-]*$')]
     [string]$Name = 'claude-dev',
 
@@ -55,8 +57,7 @@ if (-not (Test-Path (Join-Path $assetsDir 'cloud-init.yaml'))) { throw "assets �
 $StateDir = Join-Path $env:USERPROFILE '.cc-sandbox'
 if (-not (Test-Path $StateDir)) { New-Item -ItemType Directory -Path $StateDir -Force | Out-Null }
 if ($Name -eq 'bundle') { throw "VM 名不能用保留字: $Name" }
-$vmStateDir = Join-Path $StateDir $Name
-if (-not (Test-Path $vmStateDir)) { New-Item -ItemType Directory -Path $vmStateDir -Force | Out-Null }
+# $vmStateDir 的确定挪到路由 switch 之前:交互菜单可能改 $Name,不能在这里按默认名提前建子目录
 
 # 一次性迁移:多 VM 布局改造前, mounts.txt/features.txt/pid/渲染 yaml 平铺在根目录。
 # 首次跑新版本时自动挪进默认 VM(claude-dev)的子目录;bundle/.ssh-key/模板本就共享,不动
@@ -86,7 +87,7 @@ $ccSwitchPortExplicit = $PSBoundParameters.ContainsKey('CcSwitchPort')
 $nameExplicit = $PSBoundParameters.ContainsKey('Name')
 
 # ====== 常量(不变项) ======
-$vmName         = $Name                                 # 多 VM:-Name 指定;默认 claude-dev
+$vmName         = $Name                                 # 初始=-Name/默认名;交互菜单选择后在路由前重定(见"VM 名最终确定"段)
 $vmImage        = "noble"                               # Ubuntu 24.04 LTS(换版本改这里)
 $mountClaudeHost = "/home/ubuntu/.claude-host"          # 宿主机 ~/.claude 挂到 VM 哪里
 $mountWorkspace = "/home/ubuntu/workspace"              # ./workspace 挂到 VM 哪里(放在 ~/ 下)
@@ -1521,6 +1522,106 @@ function Start-DevEnvs {
     return ,@($ready)
 }
 
+# ====== VM 选择:交互菜单 + 新建向导(裸跑免记 -Name)======
+# 交互终端:start 每次弹单选菜单(受管 VM 列表 + "+ 新建 VM…",回车 = 上次使用);
+# stop/delete 仅在多于一台时弹(单台直接就是它)。非交互/显式 -Name 完全不弹,行为同从前。
+
+# 受管 VM 名 = 状态目录子目录(除 bundle;与 Show-VmsOverview / Stop-ClipDaemonIfUnused 同口径)
+function Get-ManagedVmNames {
+    return @(Get-ChildItem $StateDir -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -ne 'bundle' } | Sort-Object Name | ForEach-Object { $_.Name })
+}
+
+# multipass list 的 名字→状态 映射(拿不到返回空表,菜单退化为只显示名字)
+function Get-VmStateMap {
+    $map = @{}
+    $r = Invoke-Multipass -ArgumentList @('list', '--format', 'csv') -TimeoutSec 15
+    if ($r.ExitCode -ne 0 -or $r.TimedOut) { return $map }
+    foreach ($line in ($r.Stdout -split "`r?`n")) {
+        $cols = $line -split ','
+        if ($cols.Count -ge 2 -and $cols[0]) { $map[$cols[0]] = $cols[1] }
+    }
+    return $map
+}
+
+# 新建向导:问名字 → 逐项问挂载目录(即时校验)→ 生成 <名字>\ 子目录与 mounts.txt。
+# 返回 VM 名;名字撞受管目录时直接改选该台(不新建)
+function Enter-NewVmWizard {
+    param([Parameter(Mandatory)] [hashtable]$VmStateMap)
+    $n = ''
+    while ($true) {
+        # Read-Host 异常兜底(EOF/终端抖动按空输入,同 feature-menu.ps1 的处理)
+        try { $n = (Read-Host '新 VM 名(小写字母/数字/连字符,如 dev-java)') } catch { $n = '' }
+        $n = "$n".Trim()
+        if ($n -eq '') { continue }
+        if ($n -notmatch '^[a-z0-9][a-z0-9-]*$') { Write-Warn "名字限小写字母/数字/连字符,且以字母或数字开头: $n"; continue }
+        if ($n -eq 'bundle') { Write-Warn "'bundle' 是保留字,换一个"; continue }
+        if (@(Get-ManagedVmNames) -contains $n) { Write-Warn "$n 已是受管 VM,直接选用它"; return $n }
+        if ($VmStateMap.ContainsKey($n)) { Write-Warn "multipass 里已有名为 $n 的 VM(非本工具管理),换一个名字"; continue }
+        break
+    }
+    New-Item -ItemType Directory -Path (Join-Path $StateDir $n) -Force | Out-Null
+
+    # 挂载目录现场填:把 start 的 mounts 校验前置(目录存在 + 子目录名安全 + 不重复),别让用户
+    # 走完向导才在 start 里被 throw 拦下。子目录名规则与 Resolve-MountEntries 一致(显式别名或
+    # 宿主目录最后一级),这里只做向导内的即时反馈,权威校验仍在 start 的 Resolve-MountEntries
+    $entries = @()
+    $subdirs = @{}
+    Write-Host '  每行一个宿主机目录,直接回车结束(至少一条)。格式:D:\code\my-project 或 D:\code\my-project=别名' -ForegroundColor DarkGray
+    while ($true) {
+        try { $line = (Read-Host "挂载目录 $($entries.Count + 1)") } catch { $line = '' }
+        $line = "$line".Trim()
+        if ($line -eq '') {
+            if ($entries.Count -eq 0) { Write-Warn '至少挂载一个目录(源码留宿主机,VM 挂子目录)'; continue }
+            break
+        }
+        $hostPart  = $line.Split('=')[0].Trim()
+        $aliasPart = if ($line.Contains('=')) { $line.Split('=')[1].Trim() } else { '' }
+        if (-not (Test-Path $hostPart -PathType Container)) { Write-Warn "目录不存在或不是目录: $hostPart"; continue }
+        if ($line.Contains('=') -and $aliasPart -eq '') { Write-Warn "'=' 后没写子目录名: $line"; continue }
+        $subdir = if ($aliasPart -ne '') { $aliasPart.Replace('\', '/').Trim('/') } else { Split-Path -Leaf ($hostPart.TrimEnd('\', '/')) }
+        if ([string]::IsNullOrWhiteSpace($subdir) -or $subdir -eq '.' -or $subdir -match '(^|/)\.\.(/|$)' -or ($subdir -split '/') -contains '.') {
+            Write-Warn "子目录名不安全(不能为空/'.'/'..'): $subdir"; continue
+        }
+        if ($subdirs.ContainsKey($subdir)) { Write-Warn "子目录名重复: $subdir(已用于 $($subdirs[$subdir]))"; continue }
+        $subdirs[$subdir] = $hostPart
+        $entries += $line
+    }
+    $mountsFile = Join-Path (Join-Path $StateDir $n) 'mounts.txt'
+    $content = ((@('# 新建向导生成,可手改:每行 HostPath 或 HostPath=子目录名,# 起始为注释,空行忽略') + $entries) -join "`n") + "`n"
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($mountsFile, $content, $utf8NoBom)
+    Write-Ok "已生成 $mountsFile(以后想改挂载就编辑它)"
+    return $n
+}
+
+# VM 名解析(交互):start 弹菜单(列表 + 新建项);stop/delete/status 多台弹、单台直选。
+# 返回最终 VM 名;由调用方(路由前的顶层段)统一落 .last-vm
+function Resolve-VmNameInteractive {
+    param([Parameter(Mandatory)] [string]$Action)
+    $managed = @(Get-ManagedVmNames)
+    if ($Action -eq 'start') {
+        if ($managed.Count -eq 0) { return 'claude-dev' }        # 全新装机:直接用默认名(与从前一致)
+    } else {
+        if ($managed.Count -eq 0) { return $Name }               # 没有受管 VM:按默认名走(幂等报"不存在")
+        if ($managed.Count -eq 1) { return $managed[0] }         # 单台:不用选
+    }
+    $stateMap = Get-VmStateMap
+    $labels = @($managed | ForEach-Object {
+        if ($stateMap.ContainsKey($_) -and $stateMap[$_]) { "$_($($stateMap[$_]))" } else { $_ }
+    })
+    $options = @($labels)
+    if ($Action -eq 'start') { $options += '+ 新建 VM...' }
+    # 默认项 = 上次使用;记录失效回退 claude-dev,再回退第一项
+    $lastName = ''
+    $lastFile = Join-Path $StateDir '.last-vm'
+    if (Test-Path $lastFile) { $lastName = ("$(Get-Content $lastFile -First 1 -ErrorAction SilentlyContinue)").Trim() }
+    $defaultName = if ($managed -contains $lastName) { $lastName } elseif ($managed -contains 'claude-dev') { 'claude-dev' } else { $managed[0] }
+    $i = Select-SingleChoice -Options $options -DefaultIndex ([array]::IndexOf($managed, $defaultName)) -Prompt '选择 VM(回车 = 上次使用)'
+    if ($i -lt $labels.Count) { return $managed[$i] }
+    return (Enter-NewVmWizard -VmStateMap $stateMap)
+}
+
 # ====== start ======
 function Start-ClaudeDev {
     Assert-Prerequisites
@@ -1538,7 +1639,7 @@ function Start-ClaudeDev {
     # 可选特性:交互菜单(真人终端)> features.txt;选择统一写回 features.txt(重建后不丢)
     $enabledFeatures = Resolve-OptionalFeatures
     if (@($enabledFeatures).Count -eq 0) {
-        Write-Host "    可选特性: 无(想启用:交互终端裸跑 start 弹菜单,或编辑 $StateDir\features.txt)" -ForegroundColor DarkGray
+        Write-Host "    可选特性: 无(想启用:交互终端裸跑 start 弹菜单,或编辑 $vmStateDir\features.txt)" -ForegroundColor DarkGray
     } else {
         $featureNames = ($optionalFeatures | Where-Object { $enabledFeatures -contains $_.Id } | ForEach-Object { $_.Name }) -join ', '
         Write-Ok "可选特性: $featureNames"
@@ -1693,13 +1794,14 @@ function Show-VmsOverview {
 }
 
 function Show-Status {
-    # 无 -Name 且受管 VM 多于一台:给总览(单台详情用 status -Name <名字>)
-    if (-not $nameExplicit) {
+    # 名字未确定(非交互且没传 -Name)且受管 VM 多于一台:给总览。交互终端已在菜单里
+    # 选过台(菜单列表自带状态,就是总览),直接给所选台的详情
+    if (-not $vmResolved) {
         $dirs = @(Get-ChildItem $StateDir -Directory -ErrorAction SilentlyContinue |
             Where-Object { $_.Name -ne 'bundle' })
         if ($dirs.Count -gt 1) {
             Show-VmsOverview
-            Write-Host "    单台详情:.\scripts\launch.ps1 status -Name <名字>" -ForegroundColor DarkGray
+            Write-Host "    单台详情:.\scripts\launch.ps1 status -Name <名字>(交互终端裸跑 status 会弹菜单选)" -ForegroundColor DarkGray
             return
         }
     }
@@ -1790,7 +1892,7 @@ function Show-Status {
     Write-Step "可选特性"
     $savedFeatures = @(Get-SavedFeatureIds)
     if ($savedFeatures.Count -eq 0) {
-        Write-Host "    无(交互终端裸跑 start 弹菜单选择,或编辑 $StateDir\features.txt)" -ForegroundColor DarkGray
+        Write-Host "    无(交互终端裸跑 start 弹菜单选择,或编辑 $vmStateDir\features.txt)" -ForegroundColor DarkGray
     } else {
         foreach ($id in $savedFeatures) {
             $f = $optionalFeatures | Where-Object { $_.Id -eq $id }
@@ -1831,9 +1933,35 @@ function Delete-ClaudeDev {
     Stop-ClipBridge
     Write-Step "删 VM..."
     Invoke-VmActionGraceful -MultipassArgs @('delete', '--purge', $vmName) -DoneMsg "VM 已删除并清理"
+    # .last-vm 指向被删的 VM 时一并清掉:菜单默认项不能指到不存在的机器上
+    $lastFile = Join-Path $StateDir '.last-vm'
+    if ((Test-Path $lastFile) -and ("$(Get-Content $lastFile -First 1 -ErrorAction SilentlyContinue)").Trim() -eq $vmName) {
+        Remove-Item $lastFile -Force -ErrorAction SilentlyContinue
+    }
     Write-Host ""
     Write-Host "保留: 共享件($StateDir 根:bundle、.ssh-key)+ 该 VM 配置(${vmStateDir}:mounts.txt、features.txt,下次 start 复用)" -ForegroundColor Green
 }
+
+# ====== VM 名最终确定(交互菜单/新建向导 → 全局变量)======
+# 放在函数定义之后(要用 Select-SingleChoice/Invoke-Multipass)、路由之前(消费方都在路由内跑)。
+# .last-vm = 上次使用的 VM 名,交互菜单的默认项;显式 -Name 也写它,让"上次使用"跨场景一致。
+# $vmResolved = 名字已被"确定"(显式 -Name 或交互菜单选过):Show-Status 据此区分
+# "选定台看详情"与"未选定且多台给总览(非交互)"
+$vmResolved = $false
+if ($Action -in @('start', 'stop', 'delete', 'status')) {
+    if ($nameExplicit) {
+        $vmResolved = $true
+        "$Name" | Out-File (Join-Path $StateDir '.last-vm') -Encoding ascii -Force
+    } elseif (Test-InteractiveConsole) {
+        $picked = Resolve-VmNameInteractive -Action $Action
+        if ($picked -and $picked -ne $Name) { $Name = $picked }
+        $vmResolved = $true
+        "$Name" | Out-File (Join-Path $StateDir '.last-vm') -Encoding ascii -Force
+    }
+}
+$vmName    = $Name
+$vmStateDir = Join-Path $StateDir $Name
+if (-not (Test-Path $vmStateDir)) { New-Item -ItemType Directory -Path $vmStateDir -Force | Out-Null }
 
 # ====== 路由 ======
 switch ($Action) {

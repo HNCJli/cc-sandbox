@@ -440,10 +440,9 @@ Set-Content "$env:USERPROFILE\.cc-sandbox\dev-t2\features.txt" "clip-bridge"   #
 .\scripts\launch.ps1 start -Name dev-t2
 # 预期:剪贴板桥 daemon "复用(全局共享,PID ...)"——不再起新进程;桥隧道按 VM 各自一条
 
-# (c) 两台并存,status 无 -Name 给总览
-.\scripts\launch.ps1 status
-# 预期:claude-dev 与 dev-t2 两行(状态/IP/特性)
-.\scripts\launch.ps1 status -Name dev-t2     # 单台详情
+# (c) 两台并存:status 交互弹菜单选台,-Name/非交互不弹
+.\scripts\launch.ps1 status -Name dev-t2     # 单台详情(-Name 不弹菜单)
+cmd /c ".\scripts\launch.ps1 status < nul"   # 非交互给总览:claude-dev 与 dev-t2 两行(状态/IP/特性)
 
 # (d) daemon 共享验证:停默认台,daemon 应存活(dev-t2 还在用)
 .\scripts\launch.ps1 stop
@@ -461,6 +460,22 @@ Get-Process -Id (Get-Content "$env:USERPROFILE\.cc-sandbox\.clip-daemon.pid" -Er
 .\scripts\launch.ps1 delete -Name dev-t2
 Remove-Item "$env:USERPROFILE\.cc-sandbox\dev-t2" -Recurse -Force
 .\scripts\launch.ps1 start     # 恢复默认台
+
+# (g) 交互选择菜单 + 新建向导(需真人终端;非交互会直接跳过菜单)
+.\scripts\launch.ps1 start
+#   应先弹"选择 VM"单选:受管 VM 带状态标签 + 末项 "+ 新建 VM...",回车 = 上次使用(读 .cc-sandbox\.last-vm)
+#   选 "+ 新建 VM..." → 名字填 dev-t3 → 挂载目录现填一条(回车结束)→ 生成 dev-t3\mounts.txt 并直接起机
+Get-Content "$env:USERPROFILE\.cc-sandbox\.last-vm"           # 预期 dev-t3
+Get-Content "$env:USERPROFILE\.cc-sandbox\dev-t3\mounts.txt"  # 预期:注释头 + 刚填的条目
+.\scripts\launch.ps1 status    # 应弹菜单选台(无"新建"项);选 dev-t3 → 显示 dev-t3 单台详情
+.\scripts\launch.ps1 stop      # 多台:应弹菜单(无"新建"项);选 dev-t3
+# (h) 非交互不弹菜单、行为不变
+cmd /c ".\scripts\launch.ps1 start < nul"    # 预期:无菜单,直走 claude-dev(已有 VM 时只重挂/秒级)
+cmd /c ".\scripts\launch.ps1 status < nul"   # 预期:无菜单,多台给总览
+# (i) 清理向导建的台;delete 应顺带清掉指向它的 .last-vm
+.\scripts\launch.ps1 delete -Name dev-t3
+Test-Path "$env:USERPROFILE\.cc-sandbox\.last-vm"    # 预期 False
+Remove-Item "$env:USERPROFILE\.cc-sandbox\dev-t3" -Recurse -Force
 ```
 
 ### 预期汇总
@@ -468,10 +483,13 @@ Remove-Item "$env:USERPROFILE\.cc-sandbox\dev-t2" -Recurse -Force
 | 检查项 | 预期 |
 |---|---|
 | (b) 第二台 start | daemon 复用不重起;垫片/隧道独立部署到 dev-t2 |
-| (c) status 总览 | 两台 VM 一行一台;`-Name` 进单台详情 |
+| (c) status | `-Name` 进单台详情;非交互多台给总览;交互多台弹菜单选台 |
 | (d) 停一台 | daemon 存活;另一台桥仍通 |
 | (e) 全停 | daemon 退出 |
 | (f) delete -Name | 只删指定台;默认台不受影响 |
+| (g) 选择菜单/向导 | start 先弹单选(回车=上次);"+ 新建 VM..." 填名+挂载后直接起机;.last-vm 与 dev-t3\mounts.txt 落盘;status 多台弹菜单选台看详情 |
+| (h) 非交互 | 无菜单,start 直走 claude-dev / -Name;status 多台给总览 |
+| (i) .last-vm | delete 被记录的那台后,.last-vm 自动清除 |
 
 另:一次性迁移验证——首次用新版跑任意子命令,根目录旧的 mounts.txt/features.txt 等应自动移入 `claude-dev\` 子目录并打印"一次性迁移"提示。
 
