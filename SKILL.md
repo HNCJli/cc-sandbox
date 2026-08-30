@@ -37,7 +37,7 @@ ssh -V                      # OpenSSH 客户端
 
 两者缺一见 references/troubleshooting.md「前置」。宿主机 cc-switch(可选,见下"隧道自适应"):`netstat -ano | findstr 15721` 应 LISTENING;端口非默认时 `start` 带 `-CcSwitchPort <端口>`。
 
-**必须准备 bundle**:项目只走离线安装,先跑一次 `.\scripts\prepare-bundle.ps1` 准备离线 bundle(~220MB 含 cc-pocket,首次慢但只下一次,存入状态目录)。之后 `delete + start` 的 cloud-init 从 13 分钟 → < 2 分钟。bundle 不齐 `launch.ps1 start` 会直接报错,先补齐再启动。
+**必须准备 bundle**:项目只走离线安装,先跑一次 `.\scripts\prepare-bundle.ps1` 准备离线 bundle(~280MB 含 opencode/cc-pocket,首次慢但只下一次,存入状态目录)。之后 `delete + start` 的 cloud-init 从 13 分钟 → < 2 分钟。bundle 不齐 `launch.ps1 start` 会直接报错,先补齐再启动。
 
 ### 2. 启动
 
@@ -90,11 +90,12 @@ multipass exec claude-dev -- bash -lc "ls -la ~/workspace"
 multipass shell claude-dev
 # VM 内(Fish 交互 shell):
 claude --dangerously-skip-permissions
+opencode        # 另一个预装的 AI 编码 agent,LLM 配置与 claude 同源同步
 ```
 
 进 VM 是 fish 提示符:灰色历史建议(`→` 或 `Ctrl+F` 接受)、`Ctrl+R` 模糊搜历史、`z <关键词>` 跳目录(zoxide)。临时要 bash 敲 `bash`。
 
-每次敲 `claude` 前(fish 和 bash 都一样)profile 脚本会自动重新同步 env,宿主机 cc-switch 切 provider 后 VM 会跟上。
+每次敲 `claude` / `opencode` 前(fish 和 bash 都一样)profile 脚本会自动重新同步 env,宿主机 cc-switch 切 provider 后 VM 会跟上。opencode 的配置(`~/.config/opencode/opencode.json`)从同一份 cc-switch env 生成:base_url/token 相同、自动补 `/v1` 路径、模型表注册 Claude Code 全部模型别名字段(MODEL/OPUS/SONNET/HAIKU/FABLE/SUBAGENT,按值去重——别名映射到不同模型时 opencode 里可随时切换),默认模型取 `ANTHROPIC_MODEL`(缺省 `claude-sonnet-4-5`),走同一条反向隧道;宿主机没配 cc-switch 时不生成配置,VM 里 `opencode auth login` 自己认证。
 
 **贴宿主机路径**:勾选了"路径映射记忆"特性时,VM 里 Claude Code 的全局记忆(`~/.claude/CLAUDE.md`)带宿主机↔VM 路径映射表,对话里直接贴 Windows 路径(如 `D:\...\share-dir-01\test-project\.gitignore`),它会自动换算成挂载点路径(`/home/ubuntu/workspace/share-dir-01/test-project/.gitignore`)再操作。
 

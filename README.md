@@ -1,6 +1,6 @@
 # cc-sandbox
 
-> **这是什么**:把 Claude Code 关进 Multipass Ubuntu VM 的 Windows 沙箱,预装 Fish/fzf/zoxide/tmux/cc-pocket,开箱即用。VM 里可以放心跑 `--dangerously-skip-permissions` 最大权限,不污染宿主机;LLM env(token / base_url / 模型映射)从宿主机只读同步进 VM;workspace 双向挂载。
+> **这是什么**:把 Claude Code 关进 Multipass Ubuntu VM 的 Windows 沙箱,预装 Fish/fzf/zoxide/tmux/opencode/cc-pocket,开箱即用。VM 里可以放心跑 `--dangerously-skip-permissions` 最大权限,不污染宿主机;LLM env(token / base_url / 模型映射)从宿主机只读同步进 VM;workspace 双向挂载。
 >
 > **平台**:仅 **Windows 10/11**(Hyper-V 或 VirtualBox 后端)。Mac/Linux 不适用。
 
@@ -22,7 +22,7 @@ git clone https://github.com/HNCJli/cc-sandbox.git "$env:USERPROFILE\.claude\ski
 新版状态目录固定为 `~\.cc-sandbox`(不提供环境变量/参数更换),**不兼容旧版**(旧的 `CLAUDE_DEV_VM_HOME` 不再识别)。旧版用户三步迁移:
 
 ```powershell
-Move-Item "$env:USERPROFILE\.claude-dev-vm" "$env:USERPROFILE\.cc-sandbox"  # 状态整体搬家,免重下 220MB bundle
+Move-Item "$env:USERPROFILE\.claude-dev-vm" "$env:USERPROFILE\.cc-sandbox"  # 状态整体搬家,免重下 280MB bundle
 & $vm delete                                                                 # 删旧 VM(workspace/.ssh-key 在状态目录,已保留)
 & $vm start                                                                  # 重建 VM(VM 名仍是 claude-dev,镜像有缓存)
 ```
@@ -50,7 +50,7 @@ function vm { & "$env:USERPROFILE\.claude\skills\cc-sandbox\scripts\launch.ps1" 
 
 ```
 /(skill 包,只读)             %USERPROFILE%\.cc-sandbox\(状态目录,可写)
-├─ SKILL.md                    ├─ bundle\         离线包(~220MB,prepare-bundle 下载)
+├─ SKILL.md                    ├─ bundle\         离线包(~280MB,prepare-bundle 下载)
 ├─ scripts/                    ├─ mounts.txt      挂载配置(基于 assets\mounts.example.txt)
 │  ├─ launch.ps1               ├─ mounts.example.txt  模板(脚本自动放置)
 │  ├─ feature-menu.ps1         ├─ features.txt    可选特性选择(start 交互菜单自动改写)
@@ -72,7 +72,7 @@ function vm { & "$env:USERPROFILE\.claude\skills\cc-sandbox\scripts\launch.ps1" 
 
 ```powershell
 cd $env:USERPROFILE\.claude\skills\cc-sandbox
-.\scripts\prepare-bundle.ps1    # 必须:离线 bundle(~220MB 含 cc-pocket,首次慢,只下一次)
+.\scripts\prepare-bundle.ps1    # 必须:离线 bundle(~280MB 含 opencode/cc-pocket,首次慢,只下一次)
 .\scripts\launch.ps1 start      # 首次 3–15 分钟(镜像下载 + bundle 离线装软件)
 multipass shell claude-dev
 # VM 内:
@@ -92,6 +92,7 @@ Windows 宿主机
 └─ Multipass VM "claude-dev"      Ubuntu 24.04 (noble)
      ├─ ubuntu 用户(非 root,免密 sudo)
      ├─ Claude Code                bundle 离线装
+     ├─ opencode                   bundle 离线装(LLM 配置同 cc-switch env 生成)
      ├─ Fish + fzf + zoxide + tmux
      ├─ ~/.claude/settings.json    只含 env(白名单),RO
      ├─ ~/.claude-host/            ← 宿主机 ~/.claude 整目录挂载(内核层硬 RO)

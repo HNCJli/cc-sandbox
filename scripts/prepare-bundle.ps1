@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    准备离线 bundle(Node 20 LTS + Claude Code + cc-pocket),让 VM 创建不依赖网络下载。
+    准备离线 bundle(Node 20 LTS + Claude Code + opencode + cc-pocket),让 VM 创建不依赖网络下载。
 
 .PARAMETER Force
     重新选版本 + 重新下载(即使文件已存在)。
@@ -11,6 +11,7 @@
                    菜单实时列最近 5 个 20.x LTS + 手动输入
       Claude Code  默认最新版(latest);菜单另列最近 5 个正式版(npm 实时取)、
                    与宿主机一致(探测 claude --version)/ 保持缓存 / 手动输入
+      opencode     默认最新版(latest,与平台包版本严格配对);菜单同 Claude Code
       cc-pocket    默认"保持缓存"(无缓存则最新)
     可选开发环境组件(JDK17/Maven/uv/pnpm,默认跳过,交互菜单选装;
     非交互且无缓存直接跳过不下载,要装就在交互终端跑一次):
@@ -26,10 +27,12 @@
     .\scripts\prepare-bundle.ps1 -Force       # 重新选版本 + 全量重下
 
 bundle 下载到状态目录 %USERPROFILE%\.cc-sandbox\bundle(写死,与 launch.ps1 同一位置),
-不占用 skill 包目录。核心件(约 220 MB):
+不占用 skill 包目录。核心件(约 260 MB):
   - node-vXX.X.X-linux-x64.tar.xz          Node 20 LTS Linux 官方 tarball
   - anthropic-ai-claude-code-X.X.X.tgz     Claude Code wrapper 包(postinstall 装真二进制)
   - anthropic-ai-claude-code-linux-x64-X.X.X.tgz  Claude Code Linux 真二进制
+  - opencode-ai-X.X.X.tgz                  opencode wrapper 包(optionalDependencies 装平台包)
+  - opencode-linux-x64-X.X.X.tgz           opencode Linux 真二进制
   - cc-pocket/cc-pocket-daemon-X.X.X-linux-x86_64.tar.gz  cc-pocket 手机遥控(自带 JRE)
 可选开发环境件(另约 240 MB,全选时):
   - jdk/OpenJDK17U-jdk_x64_linux_hotspot_17.0.X_Y.tar.gz
@@ -260,7 +263,113 @@ if ((-not $Force) -and $existingWrapper -and $existingLinux) {
     }
 }
 
-# ---------- 3. cc-pocket Linux x86_64 ----------
+# ---------- 3. opencode(wrapper + Linux 真二进制,与 Claude Code 同构)----------
+# npm 官方双包:opencode-ai wrapper 的 optionalDependencies 钉死平台包版本(同步发版),
+# VM 内离线安装机制与 Claude Code 完全一致(wrapper 先装、平台包后装,npm 容忍 optional 联网失败)
+# 注:wrapper 模式用普通 * 而非 [0-9](Claude wrapper 需 [0-9] 排除 linux-x64 变体;opencode 两包
+# 前缀不同不冲突),且 -Filter 不支持 [0-9] 字符类会静默匹配失败(launch.ps1 Test-BundleReady 同坑)
+$ocWrapperPattern = 'opencode-ai-*.tgz'
+$ocLinuxPattern   = 'opencode-linux-x64-*.tgz'
+$existingOcWrapper = Get-ChildItem $bundleDir -Filter $ocWrapperPattern -ErrorAction SilentlyContinue |
+    Sort-Object LastWriteTime -Descending | Select-Object -First 1
+$existingOcLinux   = Get-ChildItem $bundleDir -Filter $ocLinuxPattern -ErrorAction SilentlyContinue |
+    Sort-Object LastWriteTime -Descending | Select-Object -First 1
+
+# 宿主机 opencode 版本(菜单锚点;探测不到就不给该项)
+$hostOcVer = $null
+try {
+    $v = (& opencode --version 2>$null | Select-Object -First 1)
+    if ($v -match '(\d+\.\d+\.\d+)') { $hostOcVer = $Matches[1] }
+} catch { }
+
+if ((-not $Force) -and $existingOcWrapper -and $existingOcLinux) {
+    Write-Ok "opencode 已存在:$($existingOcWrapper.Name) / $($existingOcLinux.Name)(用 -Force 重选/重下)"
+} else {
+    # 与 Claude Code 段同构:缓存两件套齐全才给"保持缓存",缺一半回"最新"重下补齐
+    $cachedOcVer = $null
+    if ($existingOcWrapper -and $existingOcLinux -and $existingOcWrapper.Name -match '^opencode-ai-(\d+\.\d+\.\d+)\.tgz$') { $cachedOcVer = $Matches[1] }
+    $recentOc = @()
+    if ($interactive) {
+        try {
+            $npmCmd = (Get-Command npm.cmd -ErrorAction SilentlyContinue).Source
+            if (-not $npmCmd) { throw 'npm.cmd 不在 PATH' }
+            $out = & $npmCmd view opencode-ai versions --json 2>$null
+            # PS 5.1 多行 JSON 坑:先 -join 回完整文本再 ConvertFrom-Json(详见 Claude Code 段注释)
+            $vers = ConvertFrom-Json ($out -join "`n")
+            $recentOc = @($vers | Where-Object { "$_" -notmatch '-' } | Select-Object -Last 5)
+            [array]::Reverse($recentOc)
+        } catch {
+            Write-Warn "拉取 opencode 版本列表失败(离线?只提供 默认/宿主一致/手动)"
+        }
+    }
+    $ocChoices = @()
+    if ($cachedOcVer) {
+        $ocChoices += @{ Label = "保持缓存版本 v$cachedOcVer(不重新下载)"; Ver = "cached:$cachedOcVer" }
+        $ocDefaultLabel = "v$cachedOcVer(保持缓存)"
+    } else {
+        $ocChoices += @{ Label = '最新版(latest)'; Ver = 'latest' }
+        $ocDefaultLabel = 'latest'
+    }
+    foreach ($v in ($recentOc | Where-Object { $_ -ne $cachedOcVer })) { $ocChoices += @{ Label = "$v"; Ver = $v } }
+    if ($hostOcVer -and $hostOcVer -ne $cachedOcVer) { $ocChoices += @{ Label = "与宿主机一致 v$hostOcVer"; Ver = $hostOcVer } }
+    $ocChoices += @{ Label = '手动输入版本号'; Ver = 'manual' }
+
+    $ocPick = $ocChoices[0]   # 非交互默认:有缓存用缓存,否则最新
+    if ($interactive) {
+        $labels = @($ocChoices | ForEach-Object { $_.Label })
+        $i = Select-SingleChoice -Options $labels -DefaultIndex 0 -Prompt "opencode 版本(默认 $ocDefaultLabel)"
+        $ocPick = $ocChoices[$i]
+    }
+
+    if ($ocPick.Ver -like 'cached:*') {
+        Write-Ok "opencode 沿用缓存 v$($ocPick.Ver.Split(':')[1])"
+    } else {
+        $ocVer = $ocPick.Ver
+        if ($ocVer -eq 'manual') {
+            while ($true) {
+                $ocVer = (Read-Host '输入 opencode 版本(如 1.18.25)').Trim()
+                if ($ocVer -match '^\d+\.\d+\.\d+$') { break }
+                Write-Warn "格式应为 X.Y.Z,当前输入: $ocVer"
+            }
+        }
+        $ocSuffix = if ($ocVer -eq 'latest') { '' } else { "@$ocVer" }
+        $npm = Get-Command npm -ErrorAction SilentlyContinue
+        if (-not $npm) {
+            Write-Err "宿主机没装 npm。装 Node 后重试"
+            exit 1
+        }
+        Write-Step "npm pack opencode-ai$ocSuffix(wrapper,~20KB)..."
+        try {
+            Invoke-NpmPack -Pkg "opencode-ai$ocSuffix" | Out-Null
+        } catch {
+            Write-Err $_.Exception.Message
+            exit 1
+        }
+        Write-Step "npm pack opencode-linux-x64$ocSuffix(真二进制,~60MB,慢)..."
+        try {
+            $packed = Invoke-NpmPack -Pkg "opencode-linux-x64$ocSuffix"
+            $size = [math]::Round((Get-Item $packed).Length / 1MB, 1)
+            Write-Ok "Linux 二进制打包完成:$(Split-Path $packed -Leaf) ($size MB)"
+        } catch {
+            Write-Err $_.Exception.Message
+            exit 1
+        }
+    }
+    # 换版本清旧:以最终留在目录里的最新 wrapper 为基准,删其它版本的 wrapper + 平台包
+    $keepOcWrapper = Get-ChildItem $bundleDir -Filter $ocWrapperPattern -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if ($keepOcWrapper -and $keepOcWrapper.Name -match '^opencode-ai-(\d+\.\d+\.\d+)\.tgz$') {
+        $keepOcVer = $Matches[1]
+        Get-ChildItem $bundleDir -Filter 'opencode-ai-*.tgz' -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -notmatch [regex]::Escape($keepOcVer) } |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+        Get-ChildItem $bundleDir -Filter 'opencode-linux-x64-*.tgz' -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -notmatch [regex]::Escape($keepOcVer) } |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# ---------- 4. cc-pocket Linux x86_64 ----------
 Write-Step "查 cc-pocket daemon 版本..."
 # 缓存版本直接取文件名(缺啥下啥;-Force 或无缓存才需要解析/选择)
 $cachedAsset = Get-ChildItem (Join-Path $bundleDir 'cc-pocket') -Filter 'cc-pocket-daemon-*-linux-x86_64.tar.gz' -ErrorAction SilentlyContinue |
@@ -361,7 +470,7 @@ if ($expectedHash -ne $actualHash) {
 Write-Ok "cc-pocket SHA256 校验通过"
 Write-Ok "cc-pocket bundle 就绪:$ccAsset"
 
-# ---------- 4. 可选开发环境组件(JDK 17 / Maven / uv / pnpm)----------
+# ---------- 5. 可选开发环境组件(JDK 17 / Maven / uv / pnpm)----------
 # 与核心三件同构的版本菜单,差别:非交互且无缓存 → 跳过不下载(可选件不自动下大包,
 # 要装就在交互终端跑一次本脚本)。镜像刻意选国内源:Adoptium/uv 官方都在 GitHub(常不可达)。
 
@@ -569,16 +678,20 @@ if ((-not $Force) -and $cachedPnpm) {
     }
 }
 
-# ---------- 5. 状态汇总 ----------
+# ---------- 6. 状态汇总 ----------
 Write-Step "bundle 状态:"
 $nodeOk   = Get-ChildItem $bundleDir -Filter 'node-v*-linux-x64.tar.xz' -ErrorAction SilentlyContinue | Select-Object -First 1
 $wrapOk   = Get-ChildItem $bundleDir -Filter $wrapperPattern -ErrorAction SilentlyContinue |
     Where-Object { $_.Name -notmatch 'linux-x64' } | Select-Object -First 1
 $linuxOk  = Get-ChildItem $bundleDir -Filter $linuxPattern -ErrorAction SilentlyContinue | Select-Object -First 1
+$ocWrapOk  = Get-ChildItem $bundleDir -Filter $ocWrapperPattern -ErrorAction SilentlyContinue | Select-Object -First 1
+$ocLinuxOk = Get-ChildItem $bundleDir -Filter $ocLinuxPattern -ErrorAction SilentlyContinue | Select-Object -First 1
 
 if ($nodeOk) { Write-Ok "Node:               $($nodeOk.Name)" }   else { Write-Err "Node:               缺" }
 if ($wrapOk) { Write-Ok "Claude wrapper:     $($wrapOk.Name)" }   else { Write-Err "Claude wrapper:     缺" }
 if ($linuxOk) { Write-Ok "Claude Linux 二进制:$($linuxOk.Name)" } else { Write-Err "Claude Linux 二进制:缺" }
+if ($ocWrapOk)  { Write-Ok "opencode wrapper:   $($ocWrapOk.Name)" }   else { Write-Err "opencode wrapper:   缺" }
+if ($ocLinuxOk) { Write-Ok "opencode Linux 二进制:$($ocLinuxOk.Name)" } else { Write-Err "opencode Linux 二进制:缺" }
 
 $ccOk = @(Get-ChildItem (Join-Path $bundleDir 'cc-pocket') -Filter 'cc-pocket-daemon-*-linux-x86_64.tar.gz' -ErrorAction SilentlyContinue).Count -gt 0
 if ($ccOk) { Write-Ok "cc-pocket:        已准备" } else { Write-Err "cc-pocket:        缺" }
@@ -595,7 +708,7 @@ foreach ($opt in @(
     else    { Write-Host "    --  $($opt.Name):未缓存(可选)" -ForegroundColor DarkGray }
 }
 
-if ($nodeOk -and $wrapOk -and $linuxOk -and $ccOk) {
+if ($nodeOk -and $wrapOk -and $linuxOk -and $ocWrapOk -and $ocLinuxOk -and $ccOk) {
     $totalMB = [math]::Round(((Get-ChildItem $bundleDir -Recurse -File | Measure-Object Length -Sum).Sum) / 1MB, 1)
     Write-Host "bundle 就绪($totalMB MB,含可选件)。" -ForegroundColor Green
     exit 0

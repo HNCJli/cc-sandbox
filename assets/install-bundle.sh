@@ -2,12 +2,18 @@
 set -e
 export PATH=/usr/local/bin:/usr/bin:/bin:/home/ubuntu/.local/bin:$PATH
 printf '%s\n' 'stage=3' 'package=0' 'package_name=Node.js' > /run/claude-dev/progress
-printf '%s\n' 'event=stage:3|[3/6] 安装 Node.js' >> /run/claude-dev/events
+printf '%s\n' 'event=stage:3|[3/7] 安装 Node.js' >> /run/claude-dev/events
 tar -xJf /home/ubuntu/.bundle/node-v*-linux-x64.tar.xz -C /usr/local --strip-components=1
 printf '%s\n' 'stage=4' 'package=0' 'package_name=Claude Code' > /run/claude-dev/progress
-printf '%s\n' 'event=stage:4|[4/6] 安装 Claude Code' >> /run/claude-dev/events
+printf '%s\n' 'event=stage:4|[4/7] 安装 Claude Code' >> /run/claude-dev/events
 npm install -g /home/ubuntu/.bundle/anthropic-ai-claude-code-linux-x64-*.tgz
 npm install -g /home/ubuntu/.bundle/anthropic-ai-claude-code-[0-9]*.tgz
+# opencode:npm 双包与 Claude Code 同构(wrapper 的 optionalDependencies 指向平台包,
+# 离线装时 npm 对 optional 联网拉取失败只警告,平台包随后本地 tgz 补上)
+printf '%s\n' 'stage=5' 'package=0' 'package_name=opencode' > /run/claude-dev/progress
+printf '%s\n' 'event=stage:5|[5/7] 安装 opencode' >> /run/claude-dev/events
+npm install -g /home/ubuntu/.bundle/opencode-linux-x64-*.tgz
+npm install -g /home/ubuntu/.bundle/opencode-ai-[0-9]*.tgz
 cc_asset=$(find /home/ubuntu/.bundle/cc-pocket -maxdepth 1 -name 'cc-pocket-daemon-*-linux-x86_64.tar.gz' | head -1)
 mkdir -p /home/ubuntu/.local/share/cc-pocket/versions/"${cc_asset##*/}"
 tar -xzf "$cc_asset" -C /home/ubuntu/.local/share/cc-pocket/versions/"${cc_asset##*/}"
@@ -114,4 +120,4 @@ if [ -n "$want_frontend" ]; then
     fi
 fi
 
-command -v node && command -v npm && command -v claude && command -v cc-pocket-daemon
+command -v node && command -v npm && command -v claude && command -v opencode && command -v cc-pocket-daemon

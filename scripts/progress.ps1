@@ -13,7 +13,7 @@ function Show-ProgressStage {
     $key = "stage:$Number"
     if (-not $script:progressState[$key]) {
         $script:progressState[$key] = $true
-        Write-Host ("[{0}/6] {1}" -f $Number, $Title) -ForegroundColor Cyan
+        Write-Host ("[{0}/7] {1}" -f $Number, $Title) -ForegroundColor Cyan
     }
 }
 
@@ -62,12 +62,13 @@ function Complete-BundleProgress {
     $events = @($Progress['events'])
     if ($events -match 'stage:3\|') { Show-ProgressStage -Number 3 -Title '安装 Node.js' }
     if ($events -match 'stage:4\|') { Show-ProgressStage -Number 4 -Title '安装 Claude Code' }
+    if ($events -match 'stage:5\|') { Show-ProgressStage -Number 5 -Title '安装 opencode' }
 }
 
 function Complete-StartupProgress {
     # EnabledFeatures:本次生效的可选特性 id 列表(launch.ps1 的 $optionalFeatures 目录驱动)
     param([string[]]$EnabledFeatures = @())
-    Show-ProgressStage -Number 5 -Title '处理可选组件'
+    Show-ProgressStage -Number 6 -Title '处理可选组件'
     foreach ($f in $optionalFeatures) {
         if ($EnabledFeatures -contains $f.Id) {
             # 与收尾的 FinishHint(如"已预装,未配对")对齐,别在同一输出里既 SKIP 又已启用
@@ -77,6 +78,6 @@ function Complete-StartupProgress {
             Write-Host ("    SKIP 未启用 {0}" -f $f.Name) -ForegroundColor DarkGray
         }
     }
-    Show-ProgressStage -Number 6 -Title '初始化完成'
+    Show-ProgressStage -Number 7 -Title '初始化完成'
 }
 

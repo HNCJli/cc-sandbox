@@ -107,6 +107,8 @@ $bundleKeyGlobs = @(
     'bundle/node-v*-linux-x64.tar.xz',
     'bundle/anthropic-ai-claude-code-[0-9]*.tgz',          # wrapper([0-9] 排除 linux-x64 变体)
     'bundle/anthropic-ai-claude-code-linux-x64-*.tgz',
+    'bundle/opencode-ai-[0-9]*.tgz',                       # opencode wrapper
+    'bundle/opencode-linux-x64-*.tgz',                     # opencode Linux 真二进制
     'bundle/cc-pocket/cc-pocket-daemon-*-linux-x86_64.tar.gz'
 )
 
@@ -1094,15 +1096,15 @@ function Invoke-BundlePhase {
     Write-Ok "bundle 已传输且关键文件齐全"
 
     # bundle 传输后:先探测是否已装好(已装好跳过重装,省 ~1 分钟),否则执行本地安装
-    # 用 type -P(PATH-only)而非 command -v:profile 定义了 claude() 函数,登录 shell 下 command -v 会被函数遮蔽误报成功
-    Write-Step "检查 Node.js / Claude Code / cc-pocket 是否已在 VM 内..."
-    $probe = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'bash', '-lc', 'type -P node >/dev/null && type -P claude >/dev/null && type -P cc-pocket-daemon >/dev/null') -TimeoutSec 30
+    # 用 type -P(PATH-only)而非 command -v:profile 定义了 claude()/opencode() 函数,登录 shell 下 command -v 会被函数遮蔽误报成功
+    Write-Step "检查 Node.js / Claude Code / opencode / cc-pocket 是否已在 VM 内..."
+    $probe = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'bash', '-lc', 'type -P node >/dev/null && type -P claude >/dev/null && type -P opencode >/dev/null && type -P cc-pocket-daemon >/dev/null') -TimeoutSec 30
     if ($probe.ExitCode -eq 0 -and -not $probe.TimedOut) {
-        Write-Ok "Node.js、Claude Code、cc-pocket 已在 VM 内,跳过离线重装"
+        Write-Ok "Node.js、Claude Code、opencode、cc-pocket 已在 VM 内,跳过离线重装"
     } else {
         # 以 root 运行(sudo):tar 解到 /usr/local、npm -g 全局安装都需要 root。
         # 安装脚本单独存为 LF 文件,避免默认 fish 解析多行 bash -lc 参数时破坏引号/换行。
-        Write-Step "从 bundle 安装 Node.js、Claude Code 和 cc-pocket..."
+        Write-Step "从 bundle 安装 Node.js、Claude Code、opencode 和 cc-pocket..."
         $installScriptHost = Join-Path $assetsDir 'install-bundle.sh'
         if (-not (Test-Path $installScriptHost)) { throw "缺少 bundle 安装脚本:$installScriptHost" }
         $transfer = Invoke-Multipass -ArgumentList @('transfer', $installScriptHost, "${vmName}:/tmp/install-bundle.sh") -TimeoutSec 30
@@ -1112,7 +1114,7 @@ function Invoke-BundlePhase {
         $devFlags = @($EnabledFeatures | Where-Object { $_ -like 'dev-*' } | ForEach-Object { "--$_" })
         $install = Invoke-Multipass -ArgumentList (@('exec', $vmName, '--', 'sudo', 'bash', '/tmp/install-bundle.sh') + $devFlags) -TimeoutSec 600
         if ($install.TimedOut -or $install.ExitCode -ne 0) { throw "bundle 本地安装失败，停止启动。$($install.Stderr)" }
-        Write-Ok "Node.js、Claude Code、cc-pocket 本地安装完成"
+        Write-Ok "Node.js、Claude Code、opencode、cc-pocket 本地安装完成"
     }
     $bundleProgress = Show-CloudInitProgress -VmName $vmName
     Complete-BundleProgress -Progress $bundleProgress
@@ -1406,10 +1408,13 @@ function Start-DevEnvs {
 
     # apt 索引惰性刷新:首个要装 apt 包的环境前刷一次(全新 VM cloud-init 刷过,通常很快)
     if (-not $script:devAptUpdated) { $script:devAptUpdated = $false }
+    # DPkg::Lock::Timeout:Ubuntu 的 unattended-upgrades(自动安全更新)常在后台持 dpkg 锁,
+    # 立刻报 "Could not get lock" 秒失败——等锁最长 120s 而不是撞上就认输(实测 2026-08-30)
+    $aptLockWait = @('-o', 'DPkg::Lock::Timeout=120')
     function Update-AptIfNeeded {
         if ($script:devAptUpdated) { return $true }
         Write-Step '刷新 apt 索引...'
-        $r = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'sudo', 'apt-get', 'update') -TimeoutSec 300
+        $r = Invoke-Multipass -ArgumentList (@('exec', $vmName, '--', 'sudo', 'apt-get') + $aptLockWait + @('update')) -TimeoutSec 300
         if ($r.TimedOut -or $r.ExitCode -ne 0) {
             $err = if ($r.TimedOut) { '超时' } elseif ($r.Stderr) { $r.Stderr.Trim() } else { '(无 stderr)' }
             Write-Warn "apt-get update 失败:$err(继续尝试直接安装)"
@@ -1441,7 +1446,7 @@ function Start-DevEnvs {
         } else {
             Write-Step '安装 Java 环境(在线兜底:OpenJDK 17 + Maven,几百 MB 首次较慢)...'
             [void](Update-AptIfNeeded)
-            if (Invoke-DevInstall -InstallArgs @('sudo', 'apt-get', 'install', '-y', 'openjdk-17-jdk', 'maven') -TimeoutSec 1500 -Desc 'Java 安装') {
+            if (Invoke-DevInstall -InstallArgs (@('sudo', 'apt-get') + $aptLockWait + @('install', '-y', 'openjdk-17-jdk', 'maven')) -TimeoutSec 1500 -Desc 'Java 安装') {
                 Write-Ok 'Java 环境装好(java / mvn)'
                 $ready += 'dev-java'
             }
@@ -1488,7 +1493,7 @@ function Start-DevEnvs {
         } else {
             Write-Step '安装 Python 环境(在线兜底:python3 + pip)...'
             [void](Update-AptIfNeeded)
-            if (Invoke-DevInstall -InstallArgs @('sudo', 'apt-get', 'install', '-y', 'python3', 'python3-pip') -TimeoutSec 600 -Desc 'Python 基础包安装') {
+            if (Invoke-DevInstall -InstallArgs (@('sudo', 'apt-get') + $aptLockWait + @('install', '-y', 'python3', 'python3-pip')) -TimeoutSec 600 -Desc 'Python 基础包安装') {
                 Write-Step '安装 uv(pip 清华镜像)...'
                 if (Invoke-DevInstall -InstallArgs @('sudo', 'pip3', 'install', '--break-system-packages', '-i', 'https://pypi.tuna.tsinghua.edu.cn/simple', 'uv') -TimeoutSec 300 -Desc 'uv 安装') {
                     Write-Ok 'Python 环境装好(python3 + uv)'
@@ -1662,15 +1667,15 @@ function Start-ClaudeDev {
     # bundle 检测:项目只走离线 bundle 安装(不齐直接报错,不做在线降级)
     $bundleReady = Test-BundleReady
     if (-not $bundleReady) {
-        throw "bundle 不完整,停止启动。项目不支持在线安装降级——请先跑 .\scripts\prepare-bundle.ps1 补齐 Node + Claude Code + cc-pocket 离线包后重试。"
+        throw "bundle 不完整,停止启动。项目不支持在线安装降级——请先跑 .\scripts\prepare-bundle.ps1 补齐 Node + Claude Code + opencode + cc-pocket 离线包后重试。"
     }
-    Write-Ok "检测到 bundle,安装模式: Node/Claude Code/cc-pocket 使用本地 bundle"
+    Write-Ok "检测到 bundle,安装模式: Node/Claude Code/opencode/cc-pocket 使用本地 bundle"
     $renderedPath = Render-CloudInit -EnabledFeatures $enabledFeatures -AptMirror $AptMirror
 
     $script:progressState = @{}
     $script:cloudInitShown = $script:progressState
     $script:launchProgressShown = @{}
-    Write-Step "启动 VM(若新建:基础 cloud-init + 离线 bundle 装 Node/Claude Code;已存在则只重挂/重起隧道)..."
+    Write-Step "启动 VM(若新建:基础 cloud-init + 离线 bundle 装 Node/Claude Code/opencode;已存在则只重挂/重起隧道)..."
     # 二态判断:list 失败已在 Test-VmExists 里 throw(fail-fast),绝不猜 absent 跑去 launch 新的
     $vmExists = Test-VmExists
     if ($vmExists) {
@@ -1719,7 +1724,7 @@ function Start-ClaudeDev {
     # 等 cloud-init,同时在当前窗口显示安全阶段进度
     $cloudInitProgressStatus = Wait-CloudInitWithProgress -VmName $vmName
 
-    # cloud-init 阶段结束后只记录完成,整个 bundle/传输/隧道流程结束时才显示 [6/6]
+    # cloud-init 阶段结束后只记录完成,整个 bundle/传输/隧道流程结束时才显示 [7/7]
     if ($cloudInitProgressStatus -eq 'done') {
         $cloudInitSnapshot = Show-CloudInitProgress -VmName $vmName
         Complete-CloudInitProgress -Progress $cloudInitSnapshot

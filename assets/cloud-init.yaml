@@ -62,13 +62,14 @@ write_files:
         command claude "$@"
       }
 
-  # 兜底:非登录交互 shell(tmux 新窗口等)也加载 claude 同步函数
+  # 兜底:非登录交互 shell(tmux 新窗口等)也加载 claude / opencode 同步函数
   # (登录 shell 会经由 profile.d + bash.bashrc 各 source 一次,幂等无副作用)
   - path: /etc/bash.bashrc
     append: true
     permissions: '0644'
     content: |
       [ -f /etc/profile.d/05-claude-config.sh ] && . /etc/profile.d/05-claude-config.sh
+      [ -f /etc/profile.d/07-opencode-config.sh ] && . /etc/profile.d/07-opencode-config.sh
 
   # 把 ~/.local/bin 加进 PATH(cc-pocket-daemon 装在这里,否则敲不出来)
   - path: /etc/profile.d/06-local-bin.sh
@@ -79,8 +80,62 @@ write_files:
         *) export PATH="$HOME/.local/bin:$PATH" ;;
       esac
 
-  # Fish 交互体验:灰色历史建议(右方向键/Ctrl+F 接受);启动 Claude 前同步 cc-switch env
-  # 跟 bash wrapper(05-claude-config.sh)共用同一份逻辑:读 .claude-host → jq 过滤 env → 写 ~/.claude/settings.json 444
+  # opencode 配置同步:与 05-claude-config.sh 同源同链路(cc-switch 的 env 经反向隧道,
+  # VM 里 127.0.0.1:PORT 与 claude 同样可达),生成 VM 本地 ~/.config/opencode/opencode.json。
+  # 读不到 base_url/token(公网直连/宿主无 cc-switch)时不写配置,opencode 走自身 auth
+  - path: /etc/profile.d/07-opencode-config.sh
+    permissions: '0644'
+    content: |
+      # 把宿主机 cc-switch 的 LLM env 同步进 opencode 配置(每次敲 opencode 前重新生成)。
+      # 模型表:注册 Claude Code 全部模型别名字段(MODEL/OPUS/SONNET/HAIKU/FABLE/SUBAGENT),
+      # 按值去重——别名映射到不同模型时 opencode 里可随时切;默认模型 = ANTHROPIC_MODEL
+      sync_opencode_config() {
+          [ -f "$HOME/.claude-host/settings.json" ] || return 0
+          _oc_base=$(jq -r '.env.ANTHROPIC_BASE_URL // empty' "$HOME/.claude-host/settings.json" 2>/dev/null)
+          _oc_key=$(jq -r '.env.ANTHROPIC_AUTH_TOKEN // .env.ANTHROPIC_API_KEY // empty' "$HOME/.claude-host/settings.json" 2>/dev/null)
+          [ -n "$_oc_base" ] && [ -n "$_oc_key" ] || return 0
+          # @ai-sdk/anthropic 从 baseURL 追加 /messages(Claude Code 追加 /v1/messages),
+          # 宿主机 base_url 须补 /v1 才打到同一网关路径;已带 /v1 不重复加
+          case "$_oc_base" in
+              */v1) ;;
+              */) _oc_base="${_oc_base}v1" ;;
+              *)   _oc_base="$_oc_base/v1" ;;
+          esac
+          mkdir -p "$HOME/.config/opencode"
+          jq -n --arg b "$_oc_base" --arg k "$_oc_key" --rawfile cfg "$HOME/.claude-host/settings.json" '
+              (($cfg | fromjson | .env) // {}) as $e
+              | (if ($e.ANTHROPIC_MODEL // "") == "" then "claude-sonnet-4-5" else $e.ANTHROPIC_MODEL end) as $dflt
+              | [ $dflt,
+                  $e.ANTHROPIC_DEFAULT_OPUS_MODEL   // "",
+                  $e.ANTHROPIC_DEFAULT_SONNET_MODEL // "",
+                  $e.ANTHROPIC_DEFAULT_HAIKU_MODEL  // "",
+                  $e.ANTHROPIC_DEFAULT_FABLE_MODEL  // "",
+                  $e.CLAUDE_CODE_SUBAGENT_MODEL     // "" ]
+                | map(select(. != "")) | unique
+                | map({ key: ., value: { name: . } }) | from_entries
+                | {
+                    "$schema": "https://opencode.ai/config.json",
+                    "provider": {
+                        "cc-switch": {
+                            "npm": "@ai-sdk/anthropic",
+                            "options": { "baseURL": $b, "apiKey": $k },
+                            "models": .
+                        }
+                    },
+                    "model": ("cc-switch/" + $dflt)
+                  }
+              ' > "$HOME/.config/opencode/opencode.json.tmp"
+          mv "$HOME/.config/opencode/opencode.json.tmp" "$HOME/.config/opencode/opencode.json"
+      }
+      sync_opencode_config
+      # 每次敲 opencode 前重新同步(与 claude() 同款),cc-switch 切换后同一 shell 立即生效
+      opencode() {
+          sync_opencode_config
+          command opencode "$@"
+      }
+
+  # Fish 交互体验:灰色历史建议(右方向键/Ctrl+F 接受);启动 Claude / opencode 前同步 cc-switch env
+  # 跟 bash wrapper(05/07 profile.d)共用同一份逻辑:读 .claude-host → jq 过滤 env → 写 VM 本地配置
   - path: /home/ubuntu/.config/fish/config.fish
     defer: true
     permissions: '0644'
@@ -103,6 +158,31 @@ write_files:
       function claude
           sync_claude_config
           command claude $argv
+      end
+      function sync_opencode_config
+          if not test -f "$HOME/.claude-host/settings.json"
+              return 0
+          end
+          set -l base_url (jq -r '.env.ANTHROPIC_BASE_URL // empty' "$HOME/.claude-host/settings.json" 2>/dev/null)
+          set -l api_key (jq -r '.env.ANTHROPIC_AUTH_TOKEN // .env.ANTHROPIC_API_KEY // empty' "$HOME/.claude-host/settings.json" 2>/dev/null)
+          if test -z "$base_url"; or test -z "$api_key"
+              return 0
+          end
+          # baseURL 补 /v1(同 bash 版:@ai-sdk/anthropic 与 Claude Code 的路径差异);模型注册同 bash 版
+          if not string match -q -- '*/v1' "$base_url"
+              if string match -q -- '*/' "$base_url"
+                  set base_url "$base_url"v1
+              else
+                  set base_url "$base_url"/v1
+              end
+          end
+          mkdir -p "$HOME/.config/opencode"
+          jq -n --arg b "$base_url" --arg k "$api_key" --rawfile cfg "$HOME/.claude-host/settings.json" '(($cfg | fromjson | .env) // {}) as $e | (if ($e.ANTHROPIC_MODEL // "") == "" then "claude-sonnet-4-5" else $e.ANTHROPIC_MODEL end) as $dflt | [ $dflt, $e.ANTHROPIC_DEFAULT_OPUS_MODEL // "", $e.ANTHROPIC_DEFAULT_SONNET_MODEL // "", $e.ANTHROPIC_DEFAULT_HAIKU_MODEL // "", $e.ANTHROPIC_DEFAULT_FABLE_MODEL // "", $e.CLAUDE_CODE_SUBAGENT_MODEL // "" ] | map(select(. != "")) | unique | map({ key: ., value: { name: . } }) | from_entries | { "$schema": "https://opencode.ai/config.json", "provider": { "cc-switch": { "npm": "@ai-sdk/anthropic", "options": { "baseURL": $b, "apiKey": $k }, "models": . } }, "model": ("cc-switch/" + $dflt) }' > "$HOME/.config/opencode/opencode.json.tmp"
+          mv "$HOME/.config/opencode/opencode.json.tmp" "$HOME/.config/opencode/opencode.json"
+      end
+      function opencode
+          sync_opencode_config
+          command opencode $argv
       end
 
   # Claude Code statusline 脚本(bash,launch.ps1 渲染进来)
@@ -138,7 +218,7 @@ runcmd:
   - 'touch /run/claude-dev/progress'
   - 'touch /run/claude-dev/packages'
   - touch /run/claude-dev/events
-  - printf '%s\n' 'event=stage:1|[1/6] 安装系统基础包' >> /run/claude-dev/events
+  - printf '%s\n' 'event=stage:1|[1/7] 安装系统基础包' >> /run/claude-dev/events
   - printf '%s\n' 'stage=1' 'package=0' 'package_name=starting' > /run/claude-dev/progress
   # 基础包逐个安装块由 launch.ps1 按 $basePackages 清单渲染(单一来源,与进度显示同源)。
   # 勿在此手写包行——增减基础包改 launch.ps1 的 $basePackages。

@@ -1,6 +1,6 @@
 # cc-sandbox 验证清单
 
-回归测试用。按顺序跑,前 4 项 + 测试 6(cc-pocket 随 bundle)必跑,测试 5(Tailscale)/ 测试 7(可选特性菜单)/ 测试 8(路径映射记忆)/ 测试 9(剪贴板图片粘贴)/ 测试 10(预装开发环境)/ 测试 11(多 VM)可选(后两项建议跑)。每次改 scripts\launch.ps1 / assets\cloud-init.yaml / assets\tmux.conf 后建议至少跑 1 + 4。
+回归测试用。按顺序跑,前 4 项 + 测试 6(cc-pocket / opencode 随 bundle)必跑,测试 5(Tailscale)/ 测试 7(可选特性菜单)/ 测试 8(路径映射记忆)/ 测试 9(剪贴板图片粘贴)/ 测试 10(预装开发环境)/ 测试 11(多 VM)可选(后两项建议跑)。每次改 scripts\launch.ps1 / assets\cloud-init.yaml / assets\tmux.conf 后建议至少跑 1 + 4。
 
 **通用约定**:
 - 所有 `multipass exec claude-dev -- bash -lc "..."` 命令**别换成 `cat ~/.claude/settings.json`** —— 该文件含明文 token,见 troubleshooting §C。
@@ -16,7 +16,7 @@
 
 ```powershell
 .\scripts\launch.ps1 delete          # 干净起步
-.\scripts\launch.ps1 start           # 首次 3–15 分钟(取决于网络:镜像拉取 + 220MB bundle 传输)
+.\scripts\launch.ps1 start           # 首次 3–15 分钟(取决于网络:镜像拉取 + 290MB bundle 传输)
 ```
 
 ### 验证
@@ -34,8 +34,8 @@ multipass exec claude-dev -- bash -lc "findmnt | grep /home/ubuntu/workspace"
 multipass exec claude-dev -- bash -lc "ls -la ~/workspace"
 # 预期:mounts.txt 各项对应子目录的 mount 记录;~/workspace 本身无宿主根挂载
 
-# 4. Fish + 工具链 + Node + Claude Code 装好了
-multipass exec claude-dev -- bash -lc "echo SHELL=\$(getent passwd ubuntu | cut -d: -f7); which fish fzf zoxide; node -v; command -v claude"
+# 4. Fish + 工具链 + Node + Claude Code + opencode 装好了
+multipass exec claude-dev -- bash -lc "echo SHELL=\$(getent passwd ubuntu | cut -d: -f7); which fish fzf zoxide; node -v; command -v claude; type -P opencode"
 
 # 5. 进 VM,看 Fish 提示符 + Claude Code 能跑
 multipass shell claude-dev
@@ -51,7 +51,7 @@ claude --dangerously-skip-permissions
 | `status` | VM Running + 隧道在跑/直连模式 + 探测 HTTP 4xx |
 | env 检查 | `OK` |
 | findmnt | mounts.txt 各项子目录 mount(fuse.sshfs),无宿主根挂载 |
-| 工具链 | shell=/usr/bin/fish;fish/fzf/zoxide 都有路径;Node v20.x;claude 在 |
+| 工具链 | shell=/usr/bin/fish;fish/fzf/zoxide 都有路径;Node v20.x;claude 在;opencode 在 |
 | `claude` 进 VM | 不弹登录菜单 |
 
 ### 布局解耦检查(目录重排后必看)
@@ -204,9 +204,9 @@ multipass exec claude-dev -- bash -lc "which tailscale; findmnt | grep /home/ubu
 
 ---
 
-## 测试 6:cc-pocket 随 bundle 安装
+## 测试 6:cc-pocket / opencode 随 bundle 安装
 
-**目的**:验证 cc-pocket 已从 bundle 离线装好。cc-pocket 是 bundle 必需组件,不做在线降级/容错;缺失会导致 `launch.ps1 start` 直接报错。
+**目的**:验证 cc-pocket、opencode 已从 bundle 离线装好。两者都是 bundle 必需组件,不做在线降级/容错;缺失会导致 `launch.ps1 start` 直接报错。
 
 ### 步骤
 
@@ -215,12 +215,20 @@ multipass exec claude-dev -- bash -lc "which tailscale; findmnt | grep /home/ubu
 ```powershell
 multipass exec claude-dev -- bash -lc "command -v cc-pocket-daemon && echo INSTALLED || echo NOT_INSTALLED"
 multipass exec claude-dev -- bash -lc "systemctl --user status cc-pocket-daemon 2>&1 | head -5"
+
+multipass exec claude-dev -- bash -lc "type -P opencode && opencode --version"
+# opencode 配置同步(方案 A):**别 cat 整个 opencode.json,里面含 token**,用 jq 只取字段
+multipass exec claude-dev -- bash -lc "jq -r '.provider[\"cc-switch\"].options.baseURL' ~/.config/opencode/opencode.json 2>/dev/null || echo NO_CONFIG"
+multipass exec claude-dev -- bash -lc "jq -r '.model' ~/.config/opencode/opencode.json 2>/dev/null"
 ```
 
 ### 预期
 
 - `INSTALLED`(bundle 离线安装,`install-bundle.sh` 最后一步 `command -v cc-pocket-daemon` 强制)
 - 若 `NOT_INSTALLED`:说明 bundle 缺 cc-pocket 离线包,`launch.ps1 start` 会在启动前报错;先 `.\scripts\prepare-bundle.ps1` 补齐,再 `delete + start`。
+- `type -P` 输出 opencode 路径(npm 全局),`--version` 正常(缺失同样说明 bundle 不齐,`install-bundle.sh` 自检 `command -v opencode` 强制)
+- baseURL = 宿主机 base_url 补 `/v1`(如 `http://127.0.0.1:15721/v1`);models = Claude Code 全部模型别名字段(MODEL/OPUS/SONNET/HAIKU/FABLE/SUBAGENT)非空值按值去重后的集合(别名都指同一模型时只有 1 个),默认 model = `ANTHROPIC_MODEL`(缺省 `claude-sonnet-4-5`)。`NO_CONFIG` = 宿主机没配 cc-switch env(公网直连),属正常——VM 里 `opencode auth login` 自己认证
+- 模型表展开(应与宿主机 settings.json 各 `*MODEL` 字段的去重集合一致):`multipass exec claude-dev -- bash -lc "jq -r '.provider[].models | keys[]' ~/.config/opencode/opencode.json"`
 
 ---
 
@@ -420,7 +428,7 @@ Move-Item "$env:USERPROFILE\.cc-sandbox\bundle\uv.bak" "$env:USERPROFILE\.cc-san
 | (g) 关闭单项 | grep 计数 0;包仍留在 VM 里(pnpm -v 仍可用) |
 | (h) 兜底 | uv 提示"在线兜底"并装上,`uv venv` 正常;python3-venv 未装(dpkg 计数 0);其余离线件不受影响 |
 
-**prepare-bundle 版本菜单**(需真人终端):裸跑 `.\scripts\prepare-bundle.ps1 -Force` 应依次弹核心三件 + 四个可选件的单选菜单(TUI,窗口小自动降级编号输入);非交互(如 `cmd /c ".\scripts\prepare-bundle.ps1 < nul"`,不加 -Force)不弹菜单,核心件沿用缓存,可选件无缓存时打印"跳过"提示。
+**prepare-bundle 版本菜单**(需真人终端):裸跑 `.\scripts\prepare-bundle.ps1 -Force` 应依次弹核心四件(Node/Claude Code/opencode/cc-pocket)+ 四个可选件的单选菜单(TUI,窗口小自动降级编号输入);非交互(如 `cmd /c ".\scripts\prepare-bundle.ps1 < nul"`,不加 -Force)不弹菜单,核心件沿用缓存或下最新,可选件无缓存时打印"跳过"提示。
 
 ---
 
