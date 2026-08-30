@@ -1485,12 +1485,12 @@ function Start-DevEnvs {
             Write-Ok 'Python 环境已在(python3 + uv)'
             $ready += 'dev-python'
         } else {
-            Write-Step '安装 Python 环境(在线兜底:python3 + venv + pip)...'
+            Write-Step '安装 Python 环境(在线兜底:python3 + pip)...'
             [void](Update-AptIfNeeded)
-            if (Invoke-DevInstall -InstallArgs @('sudo', 'apt-get', 'install', '-y', 'python3', 'python3-venv', 'python3-pip') -TimeoutSec 600 -Desc 'Python 基础包安装') {
+            if (Invoke-DevInstall -InstallArgs @('sudo', 'apt-get', 'install', '-y', 'python3', 'python3-pip') -TimeoutSec 600 -Desc 'Python 基础包安装') {
                 Write-Step '安装 uv(pip 清华镜像)...'
                 if (Invoke-DevInstall -InstallArgs @('sudo', 'pip3', 'install', '--break-system-packages', '-i', 'https://pypi.tuna.tsinghua.edu.cn/simple', 'uv') -TimeoutSec 300 -Desc 'uv 安装') {
-                    Write-Ok 'Python 环境装好(python3 + venv + uv)'
+                    Write-Ok 'Python 环境装好(python3 + uv)'
                     $ready += 'dev-python'
                 }
             }

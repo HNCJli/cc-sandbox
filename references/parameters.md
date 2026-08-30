@@ -25,7 +25,7 @@ workspace 挂载没有参数:唯一模式,读该 VM 子目录的 `mounts.txt`(�
 可选特性(如 Tailscale)**没有命令行开关**,只认两种来源,优先级从高到低:
 
 1. **交互菜单**:真人终端裸跑 `start` 弹方向键多选菜单(↑↓ 移动、空格 勾选、回车 确认;数字键直接切换某项,`a`/`n` 全选/全不选;不支持按键或窗口过小的终端自动降级为编号输入)
-2. **features.txt**:状态目录下的持久化文件(每行一个特性 id,`#` 注释;格式见 `assets\features.example.txt`)
+2. **features.txt**:该 VM 子目录下的持久化文件(每行一个特性 id,`#` 注释;格式见 `assets\features.example.txt`)
 
 菜单的选择会**写回 features.txt**,所以 `delete + start` 重建、日常 start 都自动沿用,不用记参数;想关掉就在菜单里选 `n`,或删掉文件里那行(重建型特性关闭后需重建 VM 才真正卸载)。stdin 被重定向时(后台/管道/Claude 代跑)自动跳过菜单、静默读 features.txt。当前全部特性见 [optional-features.md](optional-features.md);`status` 子命令也会显示已启用的特性。
 

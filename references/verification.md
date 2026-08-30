@@ -1,6 +1,6 @@
 # cc-sandbox 验证清单
 
-回归测试用。按顺序跑,前 4 项 + 测试 6(cc-pocket 随 bundle)必跑,测试 5(Tailscale)/ 测试 7(可选特性菜单)/ 测试 8(路径映射记忆)/ 测试 9(剪贴板图片粘贴)可选。每次改 scripts\launch.ps1 / assets\cloud-init.yaml / assets\tmux.conf 后建议至少跑 1 + 4。
+回归测试用。按顺序跑,前 4 项 + 测试 6(cc-pocket 随 bundle)必跑,测试 5(Tailscale)/ 测试 7(可选特性菜单)/ 测试 8(路径映射记忆)/ 测试 9(剪贴板图片粘贴)/ 测试 10(预装开发环境)/ 测试 11(多 VM)可选(后两项建议跑)。每次改 scripts\launch.ps1 / assets\cloud-init.yaml / assets\tmux.conf 后建议至少跑 1 + 4。
 
 **通用约定**:
 - 所有 `multipass exec claude-dev -- bash -lc "..."` 命令**别换成 `cat ~/.claude/settings.json`** —— 该文件含明文 token,见 troubleshooting §C。
@@ -16,7 +16,7 @@
 
 ```powershell
 .\scripts\launch.ps1 delete          # 干净起步
-.\scripts\launch.ps1 start           # 首次 3–15 分钟(取决于网络 + 是否用了 bundle)
+.\scripts\launch.ps1 start           # 首次 3–15 分钟(取决于网络:镜像拉取 + 220MB bundle 传输)
 ```
 
 ### 验证
@@ -57,10 +57,13 @@ claude --dangerously-skip-permissions
 ### 布局解耦检查(目录重排后必看)
 
 ```powershell
-# 状态目录生效:bundle/密钥/挂载点都在 %USERPROFILE%\.cc-sandbox 下
+# 状态目录生效:bundle/密钥在 %USERPROFILE%\.cc-sandbox 根(多台 VM 共享),VM 配置在 <VM 名>\ 子目录
 Test-Path "$env:USERPROFILE\.cc-sandbox\bundle"
 Test-Path "$env:USERPROFILE\.cc-sandbox\.ssh-key"
-# 旧仓库根若有 mounts.txt/bundle 等旧布局状态,首次 start 应打印"迁移旧布局状态: ..."且原文件保留
+Test-Path "$env:USERPROFILE\.cc-sandbox\claude-dev\mounts.txt"
+# 多 VM 布局改造前的平铺状态(mounts.txt/features.txt 等在状态目录根)首跑任意子命令会自动
+# 移入 claude-dev\ 子目录,打印"一次性迁移:旧平铺状态(...)已移入 claude-dev\ 子目录(多 VM 布局)"
+# —— 是移动,原文件不保留(一次性迁移的专项验证见测试 11 末尾)
 ```
 
 ---
@@ -83,7 +86,7 @@ mkdir D:\code\test2 -ErrorAction SilentlyContinue
 
 ```powershell
 # 写测试用 mounts.txt(会覆盖你自己的配置,测完记得还原)
-'D:\code\test1','D:\code\test2=alias2' | Set-Content "$env:USERPROFILE\.cc-sandbox\mounts.txt"
+'D:\code\test1','D:\code\test2=alias2' | Set-Content "$env:USERPROFILE\.cc-sandbox\claude-dev\mounts.txt"
 .\scripts\launch.ps1 delete
 .\scripts\launch.ps1 start
 ```
@@ -133,7 +136,7 @@ multipass exec claude-dev -- bash -lc "findmnt | grep /home/ubuntu/workspace"
 
 ### 预期
 
-- `start` 秒级完成(输出 `VM 已在 Running,start 改为只重挂/重起隧道` 或类似)
+- `start` 秒级完成(输出 `VM 已存在,start 改为只重挂/重起隧道(重建型参数不生效)`)
 - findmnt 仍输出两条 mount(test1 + alias2)
 
 ---
@@ -146,19 +149,19 @@ multipass exec claude-dev -- bash -lc "findmnt | grep /home/ubuntu/workspace"
 
 ```powershell
 # (a) mounts.txt 的宿主目录不存在
-'D:\nonexistent-dir-xyz' | Set-Content "$env:USERPROFILE\.cc-sandbox\mounts.txt"
+'D:\nonexistent-dir-xyz' | Set-Content "$env:USERPROFILE\.cc-sandbox\claude-dev\mounts.txt"
 .\scripts\launch.ps1 start
 
 # (b) mounts.txt 的 vmSubdir 含 '..' 逃逸
-'D:\code\test1=..\..' | Set-Content "$env:USERPROFILE\.cc-sandbox\mounts.txt"
+'D:\code\test1=..\..' | Set-Content "$env:USERPROFILE\.cc-sandbox\claude-dev\mounts.txt"
 .\scripts\launch.ps1 start
 
 # (c) mounts.txt 两个项映射到同一子目录
-'D:\code\test1','D:\code\test2=test1' | Set-Content "$env:USERPROFILE\.cc-sandbox\mounts.txt"
+'D:\code\test1','D:\code\test2=test1' | Set-Content "$env:USERPROFILE\.cc-sandbox\claude-dev\mounts.txt"
 .\scripts\launch.ps1 start
 
 # (d) mounts.txt 不存在/为空(零挂载)
-Rename-Item "$env:USERPROFILE\.cc-sandbox\mounts.txt" mounts.txt.bak
+Rename-Item "$env:USERPROFILE\.cc-sandbox\claude-dev\mounts.txt" mounts.txt.bak
 .\scripts\launch.ps1 start
 # 预期额外:状态目录自动出现 mounts.example.txt 模板(已存在则不覆盖)
 
@@ -194,7 +197,7 @@ multipass exec claude-dev -- bash -lc "which tailscale"
 Tailscale 和多目录应能叠加(菜单勾选 + mounts.txt):
 
 ```powershell
-'D:\code\test1' | Set-Content "$env:USERPROFILE\.cc-sandbox\mounts.txt"
+'D:\code\test1' | Set-Content "$env:USERPROFILE\.cc-sandbox\claude-dev\mounts.txt"
 .\scripts\launch.ps1 start
 multipass exec claude-dev -- bash -lc "which tailscale; findmnt | grep /home/ubuntu/workspace"
 ```
@@ -237,7 +240,7 @@ multipass exec claude-dev -- bash -lc "systemctl --user status cc-pocket-daemon 
 #   答 N/回车 = 跳过:VM 不动,收尾提示"已启用但本次跳过了重建,delete + start 后才装进 VM"
 
 # (b) 选择应已写入 features.txt
-Get-Content "$env:USERPROFILE\.cc-sandbox\features.txt"
+Get-Content "$env:USERPROFILE\.cc-sandbox\claude-dev\features.txt"
 # 预期:两行注释头 + 一行 tailscale
 
 # (c) 再裸跑一次 start,菜单应预勾选 [x](Tailscale 已勾选),直接回车选择不变
@@ -274,7 +277,7 @@ cmd /c ".\scripts\launch.ps1 start < nul"
 
 ```powershell
 # (a) 启用:features.txt 加一行 path-map(交互终端则裸跑 start 菜单勾选)
-Add-Content "$env:USERPROFILE\.cc-sandbox\features.txt" "path-map"
+Add-Content "$env:USERPROFILE\.cc-sandbox\claude-dev\features.txt" "path-map"
 .\scripts\launch.ps1 start    # 唤醒/重挂后应打印"已写入宿主机↔VM 路径映射"
 
 # (b) VM 内看映射块(多目录模式:每条挂载一行 + .claude-host 只读行)
@@ -285,7 +288,7 @@ multipass exec claude-dev -- bash -lc "sed -n '/cc-sandbox:begin/,/cc-sandbox:en
 multipass exec claude-dev -- bash -lc "grep -c 'cc-sandbox:begin' ~/.claude/CLAUDE.md; wc -l < ~/.claude/CLAUDE.md"
 
 # (d) 取消勾选:start 后块应被移除(计数应为 0)
-(Get-Content "$env:USERPROFILE\.cc-sandbox\features.txt") | Where-Object { $_ -ne 'path-map' } | Set-Content "$env:USERPROFILE\.cc-sandbox\features.txt"
+(Get-Content "$env:USERPROFILE\.cc-sandbox\claude-dev\features.txt") | Where-Object { $_ -ne 'path-map' } | Set-Content "$env:USERPROFILE\.cc-sandbox\claude-dev\features.txt"
 .\scripts\launch.ps1 start
 multipass exec claude-dev -- bash -lc "grep -c 'cc-sandbox:begin' ~/.claude/CLAUDE.md"
 ```
@@ -294,7 +297,7 @@ multipass exec claude-dev -- bash -lc "grep -c 'cc-sandbox:begin' ~/.claude/CLAU
 
 | 检查项 | 预期 |
 |---|---|
-| (a) start 输出 | `已写入宿主机↔VM 路径映射到 VM ~/.claude/CLAUDE.md(N 条)` |
+| (a) start 输出 | `已写入 VM ~/.claude/CLAUDE.md 记忆块(路径映射 N 条)` |
 | (b) 映射块内容 | 表格仅含 workspace 挂载:mounts.txt 每条挂载一行(前缀=宿主绝对路径、VM 路径=`/home/ubuntu/workspace/<子目录>`),不含 `.claude-host` 条目;含 `.gitignore` 换算示例 |
 | (c) 幂等 | begin 计数 = 1;重复 start 后总行数不变(不累积空行/重复块) |
 | (d) 移除 | begin 计数 = 0;`CLAUDE.md` 若有块外内容应保留 |
@@ -309,7 +312,7 @@ multipass exec claude-dev -- bash -lc "grep -c 'cc-sandbox:begin' ~/.claude/CLAU
 
 ```powershell
 # (a) 启用:features.txt 加一行 clip-bridge(交互终端则裸跑 start 菜单勾选)
-Add-Content "$env:USERPROFILE\.cc-sandbox\features.txt" "clip-bridge"
+Add-Content "$env:USERPROFILE\.cc-sandbox\claude-dev\features.txt" "clip-bridge"
 .\scripts\launch.ps1 start
 # 预期输出:daemon PID → 垫片已装 → 桥隧道 PID → "剪贴板桥端到端通(VM → 宿主 daemon)"
 
@@ -332,7 +335,7 @@ multipass exec claude-dev -- bash -lc '/usr/local/bin/xclip -selection clipboard
 multipass exec claude-dev -- bash -lc '/usr/local/bin/wl-paste --list-types'
 
 # (f) 取消勾选:start 后 daemon/隧道应停(features.txt 删掉 clip-bridge 行)
-(Get-Content "$env:USERPROFILE\.cc-sandbox\features.txt") | Where-Object { $_ -ne 'clip-bridge' } | Set-Content "$env:USERPROFILE\.cc-sandbox\features.txt"
+(Get-Content "$env:USERPROFILE\.cc-sandbox\claude-dev\features.txt") | Where-Object { $_ -ne 'clip-bridge' } | Set-Content "$env:USERPROFILE\.cc-sandbox\claude-dev\features.txt"
 .\scripts\launch.ps1 start
 .\scripts\launch.ps1 status
 # 预期:"剪贴板桥"段显示未启用;宿主机上 daemon 进程已退出
@@ -399,6 +402,8 @@ multipass exec claude-dev -- bash -lc "sed -n '/cc-sandbox:begin/,/cc-sandbox:en
 Move-Item "$env:USERPROFILE\.cc-sandbox\bundle\uv" "$env:USERPROFILE\.cc-sandbox\bundle\uv.bak"
 .\scripts\launch.ps1 delete
 .\scripts\launch.ps1 start      # 预期:uv 走"在线兜底"提示并 pip 安装成功
+multipass exec claude-dev -- bash -lc "uv --version && uv venv /tmp/uvtest && rm -rf /tmp/uvtest"   # uv 可用,uv venv 正常
+multipass exec claude-dev -- bash -lc "dpkg -l python3-venv 2>/dev/null | grep -c '^ii'"           # 预期 0:在线兜底不装 apt 的 python3-venv
 Move-Item "$env:USERPROFILE\.cc-sandbox\bundle\uv.bak" "$env:USERPROFILE\.cc-sandbox\bundle\uv" -Force
 ```
 
@@ -413,7 +418,7 @@ Move-Item "$env:USERPROFILE\.cc-sandbox\bundle\uv.bak" "$env:USERPROFILE\.cc-san
 | (e) 幂等 | 三行"已在",秒级 |
 | (f) status | "开发环境"段三项"已装" |
 | (g) 关闭单项 | grep 计数 0;包仍留在 VM 里(pnpm -v 仍可用) |
-| (h) 兜底 | uv 提示"在线兜底"并装上;其余离线件不受影响 |
+| (h) 兜底 | uv 提示"在线兜底"并装上,`uv venv` 正常;python3-venv 未装(dpkg 计数 0);其余离线件不受影响 |
 
 **prepare-bundle 版本菜单**(需真人终端):裸跑 `.\scripts\prepare-bundle.ps1 -Force` 应依次弹核心三件 + 四个可选件的单选菜单(TUI,窗口小自动降级编号输入);非交互(如 `cmd /c ".\scripts\prepare-bundle.ps1 < nul"`,不加 -Force)不弹菜单,核心件沿用缓存,可选件无缓存时打印"跳过"提示。
 

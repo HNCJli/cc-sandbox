@@ -15,4 +15,4 @@
 # 特性标记为"重建型"的(如 tailscale)需 delete + start 重建 VM 才生效;
 # 交互终端下 start 会探测并询问是否立即重建。
 # 非重建型的(如 path-map、clip-bridge、dev-*)勾上后现有 VM 下次 start 即生效
-# 此文件放在状态目录(默认 %USERPROFILE%\.cc-sandbox\features.txt),不进仓库
+# 此文件放在状态目录的 VM 子目录(默认 %USERPROFILE%\.cc-sandbox\claude-dev\features.txt),不进仓库

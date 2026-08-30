@@ -27,8 +27,8 @@ multipass exec claude-dev -- bash -lc "jq -e '.env | type == \"object\" and leng
 .\scripts\launch.ps1 stop           # 重拉一切 = 先停再起
 .\scripts\launch.ps1 start
 # 或只重起隧道(不重启 VM):
-Stop-Process -Id (Get-Content "$env:USERPROFILE\.cc-sandbox\.tunnel.pid") -Force
-Remove-Item "$env:USERPROFILE\.cc-sandbox\.tunnel.pid"
+Stop-Process -Id (Get-Content "$env:USERPROFILE\.cc-sandbox\claude-dev\.tunnel.pid") -Force
+Remove-Item "$env:USERPROFILE\.cc-sandbox\claude-dev\.tunnel.pid"
 .\scripts\launch.ps1 start          # 检测到 VM 在 Running 会跳过 launch,只重挂/重起隧道
 ```
 
@@ -211,8 +211,8 @@ PowerShell 根本没启动,exit code 5。这是 Git Bash 环境自身的 fork/sp
 .\scripts\launch.ps1 stop
 .\scripts\launch.ps1 start
 # 或只重起隧道不重启 VM:
-Stop-Process -Id (Get-Content "$env:USERPROFILE\.cc-sandbox\.tunnel.pid") -Force
-Remove-Item "$env:USERPROFILE\.cc-sandbox\.tunnel.pid"
+Stop-Process -Id (Get-Content "$env:USERPROFILE\.cc-sandbox\claude-dev\.tunnel.pid") -Force
+Remove-Item "$env:USERPROFILE\.cc-sandbox\claude-dev\.tunnel.pid"
 .\scripts\launch.ps1 start        # 检测到 VM Running,只重挂/重起隧道
 ```
 

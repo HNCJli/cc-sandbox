@@ -12,7 +12,7 @@ VM 里的 Claude Code 按表换算成 `/home/ubuntu/workspace/share-dir-01/test-
 
 - 勾选方式同 Tailscale:交互菜单空格勾选,或直接编辑 `features.txt` 加一行 `path-map`
 - **非重建型**:勾上后现有 VM 下次 `start` 即写入,不需要 delete + start;每次 start 按当前挂载刷新
-- 取消勾选后,下次 `start` 会把 VM 里这段映射块移除(`CLAUDE.md` 中标记 `<!-- cc-sandbox:begin/end -->` 之间的内容,块外自己写的内容不动)
+- 取消勾选后,下次 `start` 映射节即消失;若同时未勾选任何 dev-* 环境,整块移除(`CLAUDE.md` 中标记 `<!-- cc-sandbox:begin/end -->` 之间的内容,块外自己写的内容不动)——路径映射与预装环境共用同一个 managed block
 
 ## 剪贴板图片粘贴(clip-bridge)
 
@@ -28,7 +28,7 @@ VM 里的 Claude Code 按表换算成 `/home/ubuntu/workspace/share-dir-01/test-
 
 - **入口不限**:`multipass shell claude-dev` 或 `ssh claude-dev` 进去都能粘——垫片打的是 VM 回环,不依赖你自己的会话带隧道
 - **非重建型**:勾上后现有 VM 下次 `start` 即生效,不需要 delete + start
-- 取消勾选:下次 `start` 自动停 daemon 和隧道(恢复无桥行为);VM 里的垫片文件保留但无害(桥不通时它透传/失败退出,与没装过等价),想彻底清除可 `sudo rm /usr/local/bin/xclip /usr/local/bin/wl-paste` 或 delete + start 重建
+- 取消勾选:下次 `start` 自动停 daemon 和隧道(恢复无桥行为;多台 VM 下其他 VM 还勾着 clip-bridge 时,daemon 会保留);VM 里的垫片文件保留但无害(桥不通时它透传/失败退出,与没装过等价),想彻底清除可 `sudo rm /usr/local/bin/xclip /usr/local/bin/wl-paste` 或 delete + start 重建
 - 粘贴**文本**不受影响(文本走终端通道);桥只服务"Claude Code 主动读剪贴板"这个动作(图片为主,文本读取也顺带打通)
 - **终端快捷键坑(实测 2026-08-23)**:多数终端默认占用 `Ctrl+V` 当"粘贴文本",按键到不了 claude,粘图表现为"没反应"。Warp:设置 → Keyboard Shortcuts 搜 `paste`,清空 **Alternate Terminal Paste** 上的 Ctrl+V 绑定(Paste 本身是 Ctrl+Shift+V,保留);Windows Terminal:设置 → 操作 → 删除"粘贴 Ctrl+V"。详见 troubleshooting.md §G
 - 体检:`.\scripts\launch.ps1 status` 的"剪贴板桥"段显示 daemon / 桥隧道 / VM→宿主端到端三项状态
@@ -41,7 +41,7 @@ VM 里的 Claude Code 按表换算成 `/home/ubuntu/workspace/share-dir-01/test-
 
 | 特性 id | 装什么 | 装法 |
 |---|---|---|
-| `dev-java` | JDK 17(Adoptium Temurin)+ Maven + 阿里云镜像 | **离线 bundle 优先**(bundle 里的 jdk/maven tarball,秒装);bundle 缺件或 VM 已存在时**回退在线 apt**(几百 MB,首次较慢)。Maven 幂等写入 `~/.m2/settings.xml` 镜像(已有配置不覆盖) |
+| `dev-java` | JDK 17(Adoptium Temurin)+ Maven + 阿里云镜像 | **离线 bundle 优先**(bundle 里的 jdk/maven tarball,秒装);bundle 缺件或 VM 已存在时**回退在线 apt**(几百 MB,首次较慢;apt 装的是 Ubuntu 打包的 OpenJDK 17,非 Temurin)。Maven 幂等写入 `~/.m2/settings.xml` 镜像(已有配置不覆盖) |
 | `dev-python` | python3(基础镜像自带)+ `uv` | **离线 bundle 优先**(uv wheel 解出二进制);缺件时回退在线 apt+pip。venv/包管理全走 uv(`uv venv`/`uv add`),不装 apt 的 python3-venv |
 | `dev-frontend` | `pnpm`(10 系) | **离线 bundle 优先**(本地 tgz npm -g);缺件时回退 npm 全局装 `pnpm@10`。10.x 兼容 Node 20(11.x 需 Node 22,故不提供) |
 
@@ -72,7 +72,7 @@ sudo systemctl enable --now docker
 .\scripts\launch.ps1 start      # 弹菜单 → 空格勾选 Tailscale → 回车;直接回车=保持上次
 ```
 
-选择会写进状态目录 `features.txt`(每行一个特性 id),之后 `delete + start` 重建、日常 start 都自动沿用,不用再记参数;想关掉就再跑菜单选 `n`,或删掉文件里那行(关掉后需重建 VM 才真正卸载)。非交互场景(脚本/CI/Claude 代跑)没有菜单,静默沿用 features.txt;要改选择就直接编辑该文件,格式见 `assets\features.example.txt`。
+选择会写进状态目录该 VM 子目录的 `features.txt`(每行一个特性 id),之后 `delete + start` 重建、日常 start 都自动沿用,不用再记参数;想关掉就再跑菜单选 `n`,或删掉文件里那行(关掉后需重建 VM 才真正卸载)。非交互场景(脚本/CI/Claude 代跑)没有菜单,静默沿用 features.txt;要改选择就直接编辑该文件,格式见 `assets\features.example.txt`。
 
 **已有 VM 时启用**:cloud-init 只在创建 VM 时跑,预装必须重建。交互终端下 `start` 探测到 VM 里没装,会直接问:
 

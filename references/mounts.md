@@ -1,6 +1,6 @@
 # workspace 挂载与 mounts.txt
 
-宿主机目录进 VM 的唯一方式:状态目录下的 `mounts.txt`。状态目录常备 `mounts.example.txt` 模板(launch.ps1 运行时自动放置),复制为 `mounts.txt` 填入自己的路径(每行一项,`#` 起始为注释,至少一项否则 start 直接报错),`start` 自动读取,每项挂成 VM `~/workspace/<子目录>`:
+宿主机目录进 VM 的唯一方式:状态目录下该 VM 子目录的 `mounts.txt`(默认 `~\.cc-sandbox\claude-dev\mounts.txt`)。状态目录常备 `mounts.example.txt` 模板(launch.ps1 运行时自动放置),复制为 `mounts.txt` 填入自己的路径(每行一项,`#` 起始为注释,至少一项否则 start 直接报错),`start` 自动读取,每项挂成 VM `~/workspace/<子目录>`:
 
 ```text
 D:\code\repo1
