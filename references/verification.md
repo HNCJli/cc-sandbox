@@ -34,8 +34,8 @@ multipass exec claude-dev -- bash -lc "findmnt | grep /home/ubuntu/workspace"
 multipass exec claude-dev -- bash -lc "ls -la ~/workspace"
 # 预期:mounts.txt 各项对应子目录的 mount 记录;~/workspace 本身无宿主根挂载
 
-# 4. Fish + 工具链 + Node + Claude Code + opencode 装好了
-multipass exec claude-dev -- bash -lc "echo SHELL=\$(getent passwd ubuntu | cut -d: -f7); which fish fzf zoxide; node -v; command -v claude; type -P opencode"
+# 4. Fish + 工具链 + Claude Code + opencode 装好了(node 是 dev-frontend 可选件,不在此列)
+multipass exec claude-dev -- bash -lc "echo SHELL=\$(getent passwd ubuntu | cut -d: -f7); which fish fzf zoxide; command -v claude; type -P opencode; readlink -f /usr/local/bin/claude"
 
 # 5. 进 VM,看 Fish 提示符 + Claude Code 能跑
 multipass shell claude-dev
@@ -51,7 +51,7 @@ claude --dangerously-skip-permissions
 | `status` | VM Running + 隧道在跑/直连模式 + 探测 HTTP 4xx |
 | env 检查 | `OK` |
 | findmnt | mounts.txt 各项子目录 mount(fuse.sshfs),无宿主根挂载 |
-| 工具链 | shell=/usr/bin/fish;fish/fzf/zoxide 都有路径;Node v20.x;claude 在;opencode 在 |
+| 工具链 | shell=/usr/bin/fish;fish/fzf/zoxide 都有路径;claude 在(symlink → /opt/tools/claude/<ver>/claude);opencode 在 |
 | `claude` 进 VM | 不弹登录菜单 |
 
 ### 布局解耦检查(目录重排后必看)
@@ -226,7 +226,7 @@ multipass exec claude-dev -- bash -lc "jq -r '.model' ~/.config/opencode/opencod
 
 - `INSTALLED`(bundle 离线安装,`install-bundle.sh` 最后一步 `command -v cc-pocket-daemon` 强制)
 - 若 `NOT_INSTALLED`:说明 bundle 缺 cc-pocket 离线包,`launch.ps1 start` 会在启动前报错;先 `.\scripts\prepare-bundle.ps1` 补齐,再 `delete + start`。
-- `type -P` 输出 opencode 路径(npm 全局),`--version` 正常(缺失同样说明 bundle 不齐,`install-bundle.sh` 自检 `command -v opencode` 强制)
+- `type -P` 输出 opencode 路径(symlink → /opt/tools/opencode/<ver>/bin/opencode),`--version` 正常(缺失同样说明 bundle 不齐,`install-bundle.sh` 自检 `command -v opencode` 强制)
 - baseURL = 宿主机 base_url 补 `/v1`(如 `http://127.0.0.1:15721/v1`);models = Claude Code 全部模型别名字段(MODEL/OPUS/SONNET/HAIKU/FABLE/SUBAGENT)非空值按值去重后的集合(别名都指同一模型时只有 1 个),默认 model = `ANTHROPIC_MODEL`(缺省 `claude-sonnet-4-5`)。`NO_CONFIG` = 宿主机没配 cc-switch env(公网直连),属正常——VM 里 `opencode auth login` 自己认证
 - 模型表展开(应与宿主机 settings.json 各 `*MODEL` 字段的去重集合一致):`multipass exec claude-dev -- bash -lc "jq -r '.provider[].models | keys[]' ~/.config/opencode/opencode.json"`
 
@@ -377,43 +377,56 @@ multipass exec claude-dev -- bash -lc '/usr/local/bin/wl-paste --list-types'
 ### 步骤
 
 ```powershell
-# (a) 准备离线件(需真人终端,菜单里给 JDK/Maven/uv/pnpm 选版本;Claude 代跑=非交互会跳过)
+# (a) 准备离线件(需真人终端,菜单里给 JDK/Maven/SDKMAN/uv/pnpm/Node 选版本;Claude 代跑=非交互会跳过)
 .\scripts\prepare-bundle.ps1
-# 状态汇总应出现 jdk/OpenJDK17U-*.tar.gz、maven/*.tar.gz、uv/*.whl、pnpm/*.tgz 四行 OK
+# 状态汇总应出现 jdk/、maven/、sdkman/(cli+native)、uv/、pnpm/、node/、nvm/ 各行 OK
 
-# (b) 启用三项并重建 VM(离线装只在新建 VM 时发生;现有 VM 走在线兜底)
+# (b) 启用三项并重建 VM(离线装只在新建 VM 时发生;现有 VM 走 .bundle 离线补装或在线兜底)
 Add-Content "$env:USERPROFILE\.cc-sandbox\claude-dev\features.txt" "dev-java"
 Add-Content "$env:USERPROFILE\.cc-sandbox\claude-dev\features.txt" "dev-python"
 Add-Content "$env:USERPROFILE\.cc-sandbox\claude-dev\features.txt" "dev-frontend"
 .\scripts\launch.ps1 delete
 .\scripts\launch.ps1 start
-# 预期:bundle 安装阶段进度事件含 "dev-java:JDK 17 已离线安装" 等;Start-DevEnvs 三行"已在"
+# 预期:bundle 安装阶段事件含 "dev-java:SDKMAN ... 已离线安装"、"JDK 预置为 SDKMAN 候选"、
+#       "dev-frontend:nvm 已离线安装"、"Node vX 已预置进 nvm"、"pnpm ... 独立二进制已装" 等;Start-DevEnvs 三行"已在"
 
-# (c) VM 内验证工具链 + Maven 镜像
-multipass exec claude-dev -- bash -lc "java -version 2>&1 | head -1; mvn -v 2>/dev/null | head -1; uv --version; pnpm -v"
-multipass exec claude-dev -- bash -lc "grep -c aliyun ~/.m2/settings.xml"   # 预期 2(id 和 url)
-# java 预期 Temurin:openjdk version "17.0.x" 20xx-xx-xx(Temurin 标记,不再是 Ubuntu 打包版)
+# (c) 非交互 exec 验证工具链(symlink 桥:不进交互 shell 也要全通)
+multipass exec claude-dev -- bash -c "java -version 2>&1 | head -1; mvn -v 2>/dev/null | head -1; node -v; pnpm -v; uv --version"
+multipass exec claude-dev -- bash -c "readlink -f /usr/local/bin/java /usr/local/bin/node"   # java 走 sdkman current,node 走 nvm default
+# java 预期 Temurin:openjdk version "17.0.x" ...(Temurin 标记,不再是 Ubuntu 打包版)
+multipass exec claude-dev -- bash -c "grep -c aliyun /home/ubuntu/.m2/settings.xml"          # 预期 2(id 和 url)
 
-# (d) 记忆块含"预装开发环境"节
-multipass exec claude-dev -- bash -lc "sed -n '/cc-sandbox:begin/,/cc-sandbox:end/p' ~/.claude/CLAUDE.md"
+# (c2) 交互 shell 验证版本管理器(登录 shell 才有 sdk/nvm 函数)
+multipass exec claude-dev -- sudo -u ubuntu bash -lc "source /home/ubuntu/.sdkman/bin/sdkman-init.sh 2>/dev/null; sdk version | head -2; sdk current java"
+multipass exec claude-dev -- sudo -u ubuntu bash -lc "source /home/ubuntu/.nvm/nvm.sh; nvm ls; cat /home/ubuntu/.nvm/alias/default"
 
-# (e) 幂等:再跑一次 start,应显示"已在"并秒过
+# (d) 记忆块含"预装开发环境"节(三项各一行,提 sdkman/nvm 用法)
+multipass exec claude-dev -- bash -c "sed -n '/cc-sandbox:begin/,/cc-sandbox:end/p' /home/ubuntu/.claude/CLAUDE.md"
+
+# (e) 幂等:再跑一次 start,应显示"已在"并秒过(node 桥刷新静默执行)
 .\scripts\launch.ps1 start
 
 # (f) status 探测
 .\scripts\launch.ps1 status     # "开发环境"段三项 OK
 
-# (g) 取消勾选 dev-frontend:path-map 仍启用 → 块保留,环境节不再含 pnpm 行
+# (g) 切默认版本跟随(核心诉求:nvm 切默认 → 重跑 start → 非交互 node 跟着变)
+multipass exec claude-dev -- sudo -u ubuntu bash -lc 'source /home/ubuntu/.nvm/nvm.sh && nvm alias default 20.20.2'
+.\scripts\launch.ps1 start
+multipass exec claude-dev -- bash -c "node -v"   # 与 default 别名一致
+# sdkman 同理:sdk default java <id> 后 current 链接自动跟随(/usr/local/bin 无需重跑 start)
+multipass exec claude-dev -- sudo -u ubuntu bash -lc "source /home/ubuntu/.sdkman/bin/sdkman-init.sh && cd /tmp && mkdir -p sdk-env-test && cd sdk-env-test && echo 'java=17.0.20.1-1-tem' > .sdkmanrc && sdk env java 2>/dev/null; sdk current java; cd / && rm -rf /tmp/sdk-env-test"
+
+# (h) 取消勾选 dev-frontend:path-map 仍启用 → 块保留,环境节不再含 pnpm 行
 (Get-Content "$env:USERPROFILE\.cc-sandbox\claude-dev\features.txt") | Where-Object { $_ -ne 'dev-frontend' } | Set-Content "$env:USERPROFILE\.cc-sandbox\claude-dev\features.txt"
 .\scripts\launch.ps1 start
-multipass exec claude-dev -- bash -lc "sed -n '/cc-sandbox:begin/,/cc-sandbox:end/p' ~/.claude/CLAUDE.md | grep -c pnpm"
+multipass exec claude-dev -- bash -c "sed -n '/cc-sandbox:begin/,/cc-sandbox:end/p' /home/ubuntu/.claude/CLAUDE.md | grep -c pnpm"
 
-# (h) 在线兜底(可选,验证降级路径):临时挪走 uv 缓存后重建
+# (i) 在线兜底(可选,验证降级路径):临时挪走 uv 缓存后重建
 Move-Item "$env:USERPROFILE\.cc-sandbox\bundle\uv" "$env:USERPROFILE\.cc-sandbox\bundle\uv.bak"
 .\scripts\launch.ps1 delete
 .\scripts\launch.ps1 start      # 预期:uv 走"在线兜底"提示并 pip 安装成功
-multipass exec claude-dev -- bash -lc "uv --version && uv venv /tmp/uvtest && rm -rf /tmp/uvtest"   # uv 可用,uv venv 正常
-multipass exec claude-dev -- bash -lc "dpkg -l python3-venv 2>/dev/null | grep -c '^ii'"           # 预期 0:在线兜底不装 apt 的 python3-venv
+multipass exec claude-dev -- bash -c "uv --version && uv venv /tmp/uvtest && rm -rf /tmp/uvtest"   # uv 可用,uv venv 正常
+multipass exec claude-dev -- bash -c "dpkg -l python3-venv 2>/dev/null | grep -c '^ii'"           # 预期 0:在线兜底不装 apt 的 python3-venv
 Move-Item "$env:USERPROFILE\.cc-sandbox\bundle\uv.bak" "$env:USERPROFILE\.cc-sandbox\bundle\uv" -Force
 ```
 
@@ -421,16 +434,18 @@ Move-Item "$env:USERPROFILE\.cc-sandbox\bundle\uv.bak" "$env:USERPROFILE\.cc-san
 
 | 检查项 | 预期 |
 |---|---|
-| (a) prepare-bundle | 四个可选件菜单出现(默认跳过,选版本才下);状态汇总四行 OK |
-| (b) start(新 VM) | "JDK 17/Maven/uv/pnpm 已离线安装"事件 + 探测三行"已在" |
-| (c) 版本 | Temurin openjdk 17.0.x / Maven 3.x / uv x.y.z / pnpm x.y.z |
-| (d) 记忆块 | 含 `### 预装开发环境`,三项各一行;uv 行含 `uv venv` 用法 |
+| (a) prepare-bundle | 六个可选件菜单出现(默认跳过,选版本才下);状态汇总各目录 OK(nvm 自动拷贝,无需菜单) |
+| (b) start(新 VM) | "SDKMAN/JDK/Maven/nvm/Node/pnpm 已离线安装"事件 + 探测三行"已在" |
+| (c) 非交互 exec | Temurin 17.0.x / Maven 3.x / Node 20.x / pnpm / uv 全通;java symlink → ~/.sdkman/candidates/java/current/bin/java,node symlink → ~/.nvm/versions/node/<default>/bin/node |
+| (c2) 版本管理器 | `sdk version` 正常、`sdk current java` = 预置 id;`nvm ls` 列预置版本,default 别名 = v20.x |
+| (d) 记忆块 | 含 `### 预装开发环境`,三项各一行;java 行提 sdkman、前端行提 nvm/pnpm |
 | (e) 幂等 | 三行"已在",秒级 |
 | (f) status | "开发环境"段三项"已装" |
-| (g) 关闭单项 | grep 计数 0;包仍留在 VM 里(pnpm -v 仍可用) |
-| (h) 兜底 | uv 提示"在线兜底"并装上,`uv venv` 正常;python3-venv 未装(dpkg 计数 0);其余离线件不受影响 |
+| (g) 切默认跟随 | nvm 换 default + 重跑 start 后 `node -v` 跟随;sdkman `.sdkmanrc` + `sdk env` 生效 |
+| (h) 关闭单项 | grep 计数 0;包仍留在 VM 里(pnpm -v 仍可用) |
+| (i) 兜底 | uv 提示"在线兜底"并装上,`uv venv` 正常;python3-venv 未装(dpkg 计数 0);其余离线件不受影响 |
 
-**prepare-bundle 版本菜单**(需真人终端):裸跑 `.\scripts\prepare-bundle.ps1 -Force` 应依次弹核心四件(Node/Claude Code/opencode/cc-pocket)+ 四个可选件的单选菜单(TUI,窗口小自动降级编号输入);非交互(如 `cmd /c ".\scripts\prepare-bundle.ps1 < nul"`,不加 -Force)不弹菜单,核心件沿用缓存或下最新,可选件无缓存时打印"跳过"提示。
+**prepare-bundle 版本菜单**(需真人终端):裸跑 `.\scripts\prepare-bundle.ps1 -Force` 应依次弹核心三件(Claude Code/opencode/cc-pocket)+ 六个可选件的单选菜单(TUI,窗口小自动降级编号输入;Node 段还会弹"追加第二版本"询问,默认跳过);非交互(如 `cmd /c ".\scripts\prepare-bundle.ps1 < nul"`,不加 -Force)不弹菜单,核心件沿用缓存或下最新,可选件无缓存时打印"跳过"提示。
 
 ---
 

@@ -98,17 +98,16 @@ $clipBridgePort  = 18339                                # 剪贴板桥端口(宿
 # 增减基础包只改这里,别去动 cloud-init.yaml 的 {{BASE_PACKAGES_RUNCMD}} 块)
 $basePackages = @(
     'git', 'curl', 'wget', 'vim', 'less', 'jq', 'ripgrep', 'fd-find',
-    'tmux', 'fish', 'fzf', 'zoxide', 'openssh-server', 'sudo', 'locales', 'ca-certificates'
+    'tmux', 'fish', 'fzf', 'zoxide', 'openssh-server', 'sudo', 'locales', 'ca-certificates',
+    'unzip', 'zip'   # SDKMAN 安装/运行需要(离线解 zip + sdk install 解候选包)
 )
 
 # bundle 必需组件清单(单一来源:Test-BundleReady 的宿主侧校验、VM 内 $bundleKeyFiles 校验都由它生成;
 # 是相对 $StateDir 的 glob,PS 与 bash 通配语法兼容。加新组件:这里加一行 + install-bundle.sh 接安装)
+# 核心 3 件全为原生二进制(AI 工具与 node/npm 解耦;node 归 dev-frontend 的 nvm 管)
 $bundleKeyGlobs = @(
-    'bundle/node-v*-linux-x64.tar.xz',
-    'bundle/anthropic-ai-claude-code-[0-9]*.tgz',          # wrapper([0-9] 排除 linux-x64 变体)
     'bundle/anthropic-ai-claude-code-linux-x64-*.tgz',
-    'bundle/opencode-ai-[0-9]*.tgz',                       # opencode wrapper
-    'bundle/opencode-linux-x64-*.tgz',                     # opencode Linux 真二进制
+    'bundle/opencode-linux-x64-*.tgz',
     'bundle/cc-pocket/cc-pocket-daemon-*-linux-x86_64.tar.gz'
 )
 
@@ -150,7 +149,7 @@ $optionalFeatures = @(
         Id          = 'dev-java'
         Name        = 'Java 环境'
         RebuildOnly = $false   # 非重建型:勾上后现有 VM 下次 start 即装(probe 过就跳过)
-        Description = '预装 JDK 17 + Maven(离线 bundle 秒装;缺件/旧 VM 回退在线 apt,几百 MB 较慢)'
+        Description = 'SDKMAN 多版本管理 + 预置 JDK 17 / Maven(离线 bundle 秒装;缺件回退在线 apt)'
         Probe       = 'type -P java >/dev/null 2>&1 && type -P mvn >/dev/null 2>&1'
         FinishHint  = ''
     }
@@ -166,7 +165,7 @@ $optionalFeatures = @(
         Id          = 'dev-frontend'
         Name        = '前端工具链'
         RebuildOnly = $false
-        Description = '预装 pnpm 10 系(离线 bundle 优先;10.x 兼容 Node 20,11.x 需 Node 22)'
+        Description = 'nvm 多版本 Node(默认 20.x)+ pnpm 独立二进制(离线 bundle 优先,与 Node 版本解耦)'
         Probe       = 'pnpm -v >/dev/null 2>&1'
         FinishHint  = ''
     }
@@ -793,9 +792,9 @@ function Set-VMClaudeMemory {
         $sections += @('', '### 预装开发环境', '')
         foreach ($id in $DevEnvs) {
             switch ($id) {
-                'dev-java'     { $sections += '- Java:OpenJDK 17 + Maven(`java -version` / `mvn -v` 可用;依赖拉取已配阿里云镜像)' }
-                'dev-python'   { $sections += '- Python:系统 python3;`uv` 在 /usr/local/bin(`uv init` 建项目、`uv add <pkg>` 加依赖、`uv venv` 建虚拟环境)' }
-                'dev-frontend' { $sections += '- 前端:Node 20(基础件)+ `pnpm` 全局可用' }
+                'dev-java'     { $sections += '- Java:SDKMAN 多版本管理(`sdk list java` 看已装版本、`sdk default java <id>` 切默认、项目根 `.sdkmanrc` 自动切);预置 JDK 17 + Maven,依赖拉取已配阿里云镜像' }
+                'dev-python'   { $sections += '- Python:系统 python3;`uv` 在 /usr/local/bin(`uv init` 建项目、`uv add <pkg>` 加依赖、`uv venv -p 3.x` 建指定版本虚拟环境)' }
+                'dev-frontend' { $sections += '- 前端:nvm 管 Node 多版本(`nvm install/use <ver>` 切换,默认 20.x);`pnpm` 独立二进制全局可用,项目内 pnpm 版本由 packageManager 字段自管' }
             }
         }
     }
@@ -1097,14 +1096,15 @@ function Invoke-BundlePhase {
 
     # bundle 传输后:先探测是否已装好(已装好跳过重装,省 ~1 分钟),否则执行本地安装
     # 用 type -P(PATH-only)而非 command -v:profile 定义了 claude()/opencode() 函数,登录 shell 下 command -v 会被函数遮蔽误报成功
-    Write-Step "检查 Node.js / Claude Code / opencode / cc-pocket 是否已在 VM 内..."
-    $probe = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'bash', '-lc', 'type -P node >/dev/null && type -P claude >/dev/null && type -P opencode >/dev/null && type -P cc-pocket-daemon >/dev/null') -TimeoutSec 30
+    # node 不在探测列:语言运行时归 dev-* 可选环境(nvm/sdkman/uv),核心只有 AI 工具三件
+    Write-Step "检查 Claude Code / opencode / cc-pocket 是否已在 VM 内..."
+    $probe = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'bash', '-lc', 'type -P claude >/dev/null && type -P opencode >/dev/null && type -P cc-pocket-daemon >/dev/null') -TimeoutSec 30
     if ($probe.ExitCode -eq 0 -and -not $probe.TimedOut) {
-        Write-Ok "Node.js、Claude Code、opencode、cc-pocket 已在 VM 内,跳过离线重装"
+        Write-Ok "Claude Code、opencode、cc-pocket 已在 VM 内,跳过离线重装"
     } else {
-        # 以 root 运行(sudo):tar 解到 /usr/local、npm -g 全局安装都需要 root。
+        # 以 root 运行(sudo):tar 解到 /opt/tools、symlink 到 /usr/local/bin 都需要 root。
         # 安装脚本单独存为 LF 文件,避免默认 fish 解析多行 bash -lc 参数时破坏引号/换行。
-        Write-Step "从 bundle 安装 Node.js、Claude Code、opencode 和 cc-pocket..."
+        Write-Step "从 bundle 安装 Claude Code、opencode 和 cc-pocket(原生二进制直装)..."
         $installScriptHost = Join-Path $assetsDir 'install-bundle.sh'
         if (-not (Test-Path $installScriptHost)) { throw "缺少 bundle 安装脚本:$installScriptHost" }
         $transfer = Invoke-Multipass -ArgumentList @('transfer', $installScriptHost, "${vmName}:/tmp/install-bundle.sh") -TimeoutSec 30
@@ -1114,7 +1114,7 @@ function Invoke-BundlePhase {
         $devFlags = @($EnabledFeatures | Where-Object { $_ -like 'dev-*' } | ForEach-Object { "--$_" })
         $install = Invoke-Multipass -ArgumentList (@('exec', $vmName, '--', 'sudo', 'bash', '/tmp/install-bundle.sh') + $devFlags) -TimeoutSec 600
         if ($install.TimedOut -or $install.ExitCode -ne 0) { throw "bundle 本地安装失败，停止启动。$($install.Stderr)" }
-        Write-Ok "Node.js、Claude Code、opencode、cc-pocket 本地安装完成"
+        Write-Ok "Claude Code、opencode、cc-pocket 本地安装完成"
     }
     $bundleProgress = Show-CloudInitProgress -VmName $vmName
     Complete-BundleProgress -Progress $bundleProgress
@@ -1420,9 +1420,11 @@ function Start-ClipBridge {
 
 # ====== 开发环境(可选特性 dev-java / dev-python / dev-frontend,非重建型)======
 # 勾上后每次 start:先 probe(装过跳过),缺则装;失败只 warn 不阻塞(环境是增强不是依赖)。
-# java/maven 走 apt(cloud-init 已配镜像),Maven 再幂等配阿里云镜像(国内拉依赖必需);
-# uv 用 pip 清华源装到 /usr/local/bin(Ubuntu 24.04 PEP 668 需 --break-system-packages,
-# 沙箱 VM 可接受);pnpm 走 npm 全局。
+# 装法两级(离线优先):
+#   1) bundle 离线:VM 内 /home/ubuntu/.bundle 还留着对应件 → 重跑 install-bundle.sh --dev-*
+#      (幂等;核心件原样重装同版本,无害)
+#   2) 在线兜底(bundle 缺件/旧 VM):java 走 apt(cloud-init 已配镜像),Maven 幂等配阿里云镜像;
+#      uv 用 pip 清华源;node 走 nvm + npmmirror 镜像,pnpm 独立二进制走 npmmirror registry
 # 返回:本次确认就绪的环境 id 列表(传给挂载阶段,一并写进 VM 记忆块)。
 function Start-DevEnvs {
     param([Parameter(Mandatory)] [AllowEmptyCollection()] [string[]]$EnabledFeatures)
@@ -1459,13 +1461,88 @@ function Start-DevEnvs {
 
     $ready = @()
 
-    # Java:OpenJDK 17 + Maven + 阿里云镜像
+    # bundle 二级离线装:VM 内 .bundle 有对应件 → 重跑安装脚本(引用 $assetsDir,同主流程)
+    function Invoke-DevBundleInstall {
+        param([string]$DevFlag, [string]$BundleCheck)
+        $chk = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'bash', '-lc', $BundleCheck) -TimeoutSec 30
+        if ($chk.TimedOut -or $chk.ExitCode -ne 0) { return $false }
+        $installScriptHost = Join-Path $assetsDir 'install-bundle.sh'
+        $t = Invoke-Multipass -ArgumentList @('transfer', $installScriptHost, "${vmName}:/tmp/install-bundle.sh") -TimeoutSec 30
+        if ($t.TimedOut -or $t.ExitCode -ne 0) { return $false }
+        Write-Step "bundle 离线补装($DevFlag)..."
+        $r = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'sudo', 'bash', '/tmp/install-bundle.sh', $DevFlag) -TimeoutSec 600
+        if ($r.TimedOut -or $r.ExitCode -ne 0) {
+            Write-Warn "bundle 离线补装 $DevFlag 失败:$($r.Stderr)"
+            return $false
+        }
+        return $true
+    }
+
+    # 前端在线兜底:整段 bash 脚本经 transfer 传入(引号不穿透 exec);nvm.sh 用宿主 assets vendor 件,
+    # node/pnpm 全走 npmmirror(国内可达)
+    function Invoke-FrontendOnlineFallback {
+        $feScript = @'
+#!/usr/bin/env bash
+set -e
+U=/home/ubuntu
+# nvm 本体(若缺):/tmp/nvm.sh 由宿主 assets 传入
+if [ ! -s "$U/.nvm/nvm.sh" ] && [ -s /tmp/nvm.sh ]; then
+    mkdir -p "$U/.nvm"
+    cp /tmp/nvm.sh "$U/.nvm/nvm.sh"
+    grep -q 'NVM_DIR' "$U/.bashrc" 2>/dev/null || \
+        printf '\nexport NVM_DIR="$HOME/.nvm"\nexport NVM_NODEJS_ORG_MIRROR=https://npmmirror.com/mirrors/node\n[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"\n' >> "$U/.bashrc"
+fi
+# Node 20(若缺):npmmirror 镜像直解进 nvm versions
+if [ ! -x /usr/local/bin/node ] && [ -s "$U/.nvm/nvm.sh" ]; then
+    ver=v20.20.2
+    mkdir -p "$U/.nvm/versions/node/$ver" "$U/.nvm/alias"
+    curl -fsSL "https://registry.npmmirror.com/-/binary/node/$ver/node-$ver-linux-x64.tar.xz" | tar -xJ -C "$U/.nvm/versions/node/$ver" --strip-components=1
+    echo "$ver" > "$U/.nvm/alias/default"
+    for b in node npm npx; do ln -sfn "$U/.nvm/versions/node/$ver/bin/$b" "/usr/local/bin/$b"; done
+fi
+chown -R ubuntu:ubuntu "$U/.nvm" 2>/dev/null || true
+# pnpm 独立二进制(若缺):npmmirror registry tarball(@pnpm/linux-x64 平台包)
+if ! pnpm -v >/dev/null 2>&1; then
+    v=$(curl -fsSL https://registry.npmmirror.com/@pnpm/linux-x64 | jq -r '."dist-tags".latest')
+    curl -fsSL "https://registry.npmmirror.com/@pnpm/linux-x64/-/linux-x64-$v.tgz" | tar -xz -C /tmp --strip-components=1 package/pnpm
+    install -m 0755 /tmp/pnpm /usr/local/bin/pnpm && rm -f /tmp/pnpm
+    sudo -u ubuntu pnpm config set --global registry https://registry.npmmirror.com || true
+fi
+pnpm -v >/dev/null 2>&1 && node -v >/dev/null 2>&1
+'@
+        $scriptHost = Join-Path $env:TEMP 'cc-sandbox-fe-fallback.sh'
+        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        [System.IO.File]::WriteAllText($scriptHost, $feScript, $utf8NoBom)
+        $nvmHost = Join-Path $assetsDir 'nvm.sh'
+        if (-not (Test-Path $nvmHost)) { Write-Warn "缺 assets/nvm.sh($nvmHost)"; return $false }
+        $t1 = Invoke-Multipass -ArgumentList @('transfer', $nvmHost, "${vmName}:/tmp/nvm.sh") -TimeoutSec 30
+        if ($t1.TimedOut -or $t1.ExitCode -ne 0) { Write-Warn 'nvm.sh 传入 VM 失败'; return $false }
+        $t2 = Invoke-Multipass -ArgumentList @('transfer', $scriptHost, "${vmName}:/tmp/cc-sandbox-fe-fallback.sh") -TimeoutSec 30
+        if ($t2.TimedOut -or $t2.ExitCode -ne 0) { Write-Warn '前端兜底脚本传入 VM 失败'; return $false }
+        $r = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'sudo', 'bash', '/tmp/cc-sandbox-fe-fallback.sh') -TimeoutSec 600
+        if ($r.TimedOut -or $r.ExitCode -ne 0) {
+            $err = if ($r.TimedOut) { '超时' } elseif ($r.Stderr) { $r.Stderr.Trim() } else { '(无 stderr)' }
+            Write-Warn "前端在线兜底失败:$err(npmmirror 不通?重跑 start,或交互终端跑 prepare-bundle 备料)"
+            return $false
+        }
+        return $true
+    }
+
+    # Java:SDKMAN + JDK 17 + Maven + 阿里云镜像
     if ($EnabledFeatures -contains 'dev-java') {
-        if (Test-DevProbe 'type -P java >/dev/null 2>&1 && type -P mvn >/dev/null 2>&1') {
-            Write-Ok 'Java 环境已在(OpenJDK + Maven)'
+        $javaProbe = 'type -P java >/dev/null 2>&1 && type -P mvn >/dev/null 2>&1'
+        if (Test-DevProbe $javaProbe) {
+            Write-Ok 'Java 环境已在(java / mvn)'
             $ready += 'dev-java'
+        } elseif (Invoke-DevBundleInstall -DevFlag '--dev-java' -BundleCheck 'ls /home/ubuntu/.bundle/jdk/OpenJDK17U-*.tar.gz >/dev/null 2>&1 && ls /home/ubuntu/.bundle/maven/apache-maven-*-bin.tar.gz >/dev/null 2>&1') {
+            if (Test-DevProbe $javaProbe) {
+                Write-Ok 'Java 环境装好(bundle 离线:SDKMAN + JDK + Maven)'
+                $ready += 'dev-java'
+            } else {
+                Write-Warn 'bundle 离线装完 java/mvn 仍不可用(看上方 install-bundle.sh 的 WARN)'
+            }
         } else {
-            Write-Step '安装 Java 环境(在线兜底:OpenJDK 17 + Maven,几百 MB 首次较慢)...'
+            Write-Step '安装 Java 环境(在线兜底:apt OpenJDK 17 + Maven,几百 MB 首次较慢;SDKMAN 需重建 VM 走 bundle)...'
             [void](Update-AptIfNeeded)
             if (Invoke-DevInstall -InstallArgs (@('sudo', 'apt-get') + $aptLockWait + @('install', '-y', 'openjdk-17-jdk', 'maven')) -TimeoutSec 1500 -Desc 'Java 安装') {
                 Write-Ok 'Java 环境装好(java / mvn)'
@@ -1506,11 +1583,19 @@ function Start-DevEnvs {
     }
 
     # Python:python3(基础镜像自带)+ uv;venv/包管理全走 uv,不依赖 apt 的 python3-venv。
-    # bundle 离线装好的话这里的探测直接通过;走到安装分支 = 在线兜底(bundle 无 uv 或 VM 已存在)
+    # bundle 离线装好的话这里的探测直接通过;走到安装分支 = bundle 无 uv 或 VM 已存在
     if ($EnabledFeatures -contains 'dev-python') {
-        if (Test-DevProbe 'type -P python3 >/dev/null 2>&1 && type -P uv >/dev/null 2>&1') {
+        $pyProbe = 'type -P python3 >/dev/null 2>&1 && type -P uv >/dev/null 2>&1'
+        if (Test-DevProbe $pyProbe) {
             Write-Ok 'Python 环境已在(python3 + uv)'
             $ready += 'dev-python'
+        } elseif (Invoke-DevBundleInstall -DevFlag '--dev-python' -BundleCheck 'ls /home/ubuntu/.bundle/uv/uv-*.whl >/dev/null 2>&1') {
+            if (Test-DevProbe $pyProbe) {
+                Write-Ok 'Python 环境装好(bundle 离线:uv)'
+                $ready += 'dev-python'
+            } else {
+                Write-Warn 'bundle 离线装完 uv 仍不可用(看上方 install-bundle.sh 的 WARN)'
+            }
         } else {
             Write-Step '安装 Python 环境(在线兜底:python3 + pip)...'
             [void](Update-AptIfNeeded)
@@ -1524,25 +1609,38 @@ function Start-DevEnvs {
         }
     }
 
-    # 前端:pnpm 10 系(Node 已是基础件;pnpm 11.x 需 Node≥22 与 VM 的 Node 20 不兼容)
+    # 前端:nvm 多版本 Node + pnpm 独立二进制(自含运行时,与 node 版本解耦)
     if ($EnabledFeatures -contains 'dev-frontend') {
-        # 探测用 pnpm -v 而非 type -P:文件在但跑不起来(如误装 11.x)也算未装
-        if (Test-DevProbe 'pnpm -v >/dev/null 2>&1') {
+        # 探测用 pnpm -v 而非 type -P:文件在但跑不起来也算未装
+        $feProbe = 'pnpm -v >/dev/null 2>&1'
+        if (Test-DevProbe $feProbe) {
             Write-Ok '前端工具链已在(pnpm)'
             $ready += 'dev-frontend'
+        } elseif (Invoke-DevBundleInstall -DevFlag '--dev-frontend' -BundleCheck 'ls /home/ubuntu/.bundle/node/node-v*-linux-x64.tar.xz >/dev/null 2>&1 && ls /home/ubuntu/.bundle/nvm/nvm-v*.sh >/dev/null 2>&1') {
+            if (Test-DevProbe $feProbe) {
+                Write-Ok '前端工具链装好(bundle 离线:nvm + Node + pnpm)'
+                $ready += 'dev-frontend'
+            } else {
+                Write-Warn 'bundle 离线装完 pnpm 仍不可用(看上方 install-bundle.sh 的 WARN)'
+            }
         } else {
-            Write-Step '安装 pnpm(在线兜底:npm 全局,钉 10 系兼容 Node 20)...'
-            if (Invoke-DevInstall -InstallArgs @('sudo', 'npm', 'install', '-g', 'pnpm@10') -TimeoutSec 300 -Desc 'pnpm 安装') {
-                # npm 退出码 0 不代表 pnpm 能跑(版本不兼容时会装上但崩),复跑探测确认
-                if (Test-DevProbe 'pnpm -v >/dev/null 2>&1') {
-                    Write-Ok '前端工具链装好(pnpm)'
+            Write-Step '安装前端工具链(在线兜底:nvm + npmmirror Node + pnpm 独立二进制)...'
+            if (Invoke-FrontendOnlineFallback) {
+                if (Test-DevProbe $feProbe) {
+                    Write-Ok '前端工具链装好(nvm + Node + pnpm)'
                     $ready += 'dev-frontend'
                 } else {
-                    Write-Warn 'pnpm 已装但跑不起来(Node/pnpm 版本不兼容?重跑 start 换版本)'
+                    Write-Warn '在线兜底执行完 pnpm 仍不可用(npmmirror 不通?重跑 start,或交互终端跑 prepare-bundle 备料)'
                 }
-            } else {
-                Write-Warn 'npm 源不通时可在 VM 里换镜像后重跑 start:sudo npm config -g set registry https://registry.npmmirror.com'
             }
+        }
+        # nvm 默认别名 → /usr/local/bin 桥重指(nvm 无 current 链接;
+        # 用户 `nvm alias default <ver>` 换默认后重跑 start 即跟随)。
+        # 别名文件存的是用户原始输入(可能是 "22" 这种短形式),必须经 nvm 解析成完整版本号
+        $refresh = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'sudo', 'bash', '-c',
+            'd=$(bash -c ". /home/ubuntu/.nvm/nvm.sh >/dev/null 2>&1 && nvm version default" 2>/dev/null); if [ -n "$d" ] && [ "$d" != "none" ] && [ -d "/home/ubuntu/.nvm/versions/node/$d" ]; then for b in node npm npx; do ln -sfn "/home/ubuntu/.nvm/versions/node/$d/bin/$b" "/usr/local/bin/$b"; done; fi') -TimeoutSec 60
+        if ($refresh.TimedOut -or $refresh.ExitCode -ne 0) {
+            Write-Warn 'node 桥接 symlink 刷新失败(不影响 VM 内交互使用 nvm)'
         }
     }
     return ,@($ready)
@@ -1688,15 +1786,15 @@ function Start-ClaudeDev {
     # bundle 检测:项目只走离线 bundle 安装(不齐直接报错,不做在线降级)
     $bundleReady = Test-BundleReady
     if (-not $bundleReady) {
-        throw "bundle 不完整,停止启动。项目不支持在线安装降级——请先跑 .\scripts\prepare-bundle.ps1 补齐 Node + Claude Code + opencode + cc-pocket 离线包后重试。"
+        throw "bundle 不完整,停止启动。项目不支持在线安装降级——请先跑 .\scripts\prepare-bundle.ps1 补齐 Claude Code + opencode + cc-pocket 离线包后重试。"
     }
-    Write-Ok "检测到 bundle,安装模式: Node/Claude Code/opencode/cc-pocket 使用本地 bundle"
+    Write-Ok "检测到 bundle,安装模式: Claude Code/opencode/cc-pocket 原生二进制走本地 bundle"
     $renderedPath = Render-CloudInit -EnabledFeatures $enabledFeatures -AptMirror $AptMirror
 
     $script:progressState = @{}
     $script:cloudInitShown = $script:progressState
     $script:launchProgressShown = @{}
-    Write-Step "启动 VM(若新建:基础 cloud-init + 离线 bundle 装 Node/Claude Code/opencode;已存在则只重挂/重起隧道)..."
+    Write-Step "启动 VM(若新建:基础 cloud-init + 离线 bundle 装 Claude Code/opencode/cc-pocket;已存在则只重挂/重起隧道)..."
     # 二态判断:list 失败已在 Test-VmExists 里 throw(fail-fast),绝不猜 absent 跑去 launch 新的
     $vmExists = Test-VmExists
     if ($vmExists) {

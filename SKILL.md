@@ -53,7 +53,7 @@ ssh -V                      # OpenSSH 客户端
 
 **`start` 全部参数**(共 5 个,均为可选:资源 3 个 + 端口 + APT 镜像):完整参数表见 [references/parameters.md](references/parameters.md)。权威来源:`scripts\launch.ps1` 顶部 `param()` 块。
 
-首次 3–15 分钟(下载 Ubuntu 镜像 + cloud-init 装基础包;Node/Claude 从 bundle 离线装)。脚本会自动:开 privileged-mounts → 创建/唤醒 VM → 挂 `~/.claude`(RO)和 workspace → 起隧道(如需要)。
+首次 3–15 分钟(下载 Ubuntu 镜像 + cloud-init 装基础包;Claude Code/opencode/cc-pocket 原生二进制从 bundle 离线装)。脚本会自动:开 privileged-mounts → 创建/唤醒 VM → 挂 `~/.claude`(RO)和 workspace → 起隧道(如需要)。
 
 **隧道自适应**:脚本读宿主机 `~/.claude/settings.json` 的 `env.ANTHROPIC_BASE_URL`——指向 `127.0.0.1`/`localhost`(cc-switch 类本地代理)时起 SSH 反向隧道回连;是公网地址则自动跳过隧道,VM 直连。没有 cc-switch 的机器也能用。
 

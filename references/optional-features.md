@@ -42,12 +42,19 @@ VM 里的 Claude Code 按表换算成 `/home/ubuntu/workspace/share-dir-01/test-
 
 | 特性 id | 装什么 | 装法 |
 |---|---|---|
-| `dev-java` | JDK 17(Adoptium Temurin)+ Maven + 阿里云镜像 | **离线 bundle 优先**(bundle 里的 jdk/maven tarball,秒装);bundle 缺件或 VM 已存在时**回退在线 apt**(几百 MB,首次较慢;apt 装的是 Ubuntu 打包的 OpenJDK 17,非 Temurin)。Maven 幂等写入 `~/.m2/settings.xml` 镜像(已有配置不覆盖) |
-| `dev-python` | python3(基础镜像自带)+ `uv` | **离线 bundle 优先**(uv wheel 解出二进制);缺件时回退在线 apt+pip。venv/包管理全走 uv(`uv venv`/`uv add`),不装 apt 的 python3-venv |
-| `dev-frontend` | `pnpm`(10 系) | **离线 bundle 优先**(本地 tgz npm -g);缺件时回退 npm 全局装 `pnpm@10`。10.x 兼容 Node 20(11.x 需 Node 22,故不提供) |
+| `dev-java` | **SDKMAN** + JDK 17(Adoptium Temurin)+ Maven + 阿里云镜像 | **离线 bundle 优先**(sdkman zip + jdk/maven tarball 预置进 `~/.sdkman/candidates`,秒装);bundle 缺件或 VM 已存在时**回退在线 apt**(几百 MB,首次较慢;apt 装的是 Ubuntu 打包的 OpenJDK 17,非 Temurin,**不带 SDKMAN**——要 SDKMAN 得 delete + start 重建)。Maven 幂等写入 `~/.m2/settings.xml` 镜像(已有配置不覆盖) |
+| `dev-python` | python3(基础镜像自带)+ `uv` | **离线 bundle 优先**(uv wheel 解出二进制);缺件时回退在线 apt+pip。venv/包管理全走 uv(`uv venv -p 3.x`/`uv add`),不装 apt 的 python3-venv |
+| `dev-frontend` | **nvm** + Node 20.x(可多版本)+ `pnpm` 独立二进制 | **离线 bundle 优先**(nvm.sh vendor 件 + node tarball 预置进 `~/.nvm/versions`);缺件时回退在线装(nvm.sh 本地传入 + npmmirror 下 node/pnpm)。pnpm 自含运行时,**与 node 版本解耦**;项目内 pnpm 版本由 packageManager 字段自管 |
 
-- **离线件从哪来**:`.\scripts\prepare-bundle.ps1` 交互终端跑一次,菜单里给 JDK/Maven/uv/pnpm 选装版本(默认跳过,选了才下;非交互跑不会自动下这 ~240MB)。装进 VM 的就是当时选定的版本
-- 现有 VM 首次勾选走在线兜底装;之后 delete + start 重建的 VM 全走离线秒装
+版本管理器用法(VM 内交互 shell):
+
+- **java**:`sdk list java`(已装版本)、`sdk default java <id>` 切默认(自动跟随到 `/usr/local/bin`)、项目根 `.sdkmanrc` 自动切(`sdkman_auto_env=true` 已开)
+- **node**:`nvm install/use <ver>`(镜像已配 npmmirror)、`nvm alias default <ver>` 切默认(**切完重跑 start**,`/usr/local/bin` 桥接会重指)
+- **python**:uv 自管(`uv python install 3.x`、`uv venv -p 3.x`)
+- 新版本 JDK/Node 离线装:宿主机交互终端重跑 `prepare-bundle.ps1` 选装/追加,再 delete + start(`sdk install java` / `nvm install` 在线源走 GitHub,常不可达)
+
+- **离线件从哪来**:`.\scripts\prepare-bundle.ps1` 交互终端跑一次,菜单里给 JDK/Maven/SDKMAN/uv/pnpm/Node 选装版本(默认跳过,选了才下;非交互跑不会自动下这几百 MB)。装进 VM 的就是当时选定的版本
+- 现有 VM 首次勾选:VM 内 `.bundle` 还留着对应件就离线补装,否则走在线兜底;之后 delete + start 重建的 VM 全走离线秒装
 - 装好后写进 VM 里 Claude Code 的全局记忆(`~/.claude/CLAUDE.md` 的 managed block):VM 里的 claude 知道自己有哪些环境、uv/pnpm 怎么用
 - 与"路径映射记忆"**共用同一个 managed block**:任一启用就写,全部取消勾选才移除整块
 - 安装失败只警告不阻塞 start(环境是增强不是依赖);重跑 `start` 自愈

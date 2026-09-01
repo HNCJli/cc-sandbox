@@ -38,7 +38,7 @@ write_files:
 
   # settings.json 同步: 宿主机挂载的 .claude-host → VM 实际 .claude/(VM 内只读)
   # 白名单过滤:提取 LLM 相关 env + 注入 VM 本地 statusLine;mcpServers/hooks/permissions 等一律丢弃
-  # 注:此文件不依赖 06-local-bin.sh 的 PATH(claude 是 npm 全局,不是 ~/.local/bin)
+  # 注:此文件不依赖 06-local-bin.sh 的 PATH(claude 在 /usr/local/bin,不是 ~/.local/bin)
   - path: /etc/profile.d/05-claude-config.sh
     permissions: '0644'
     content: |

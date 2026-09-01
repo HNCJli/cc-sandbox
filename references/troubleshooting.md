@@ -138,10 +138,10 @@ multipass exec claude-dev -- sudo tail -n 80 /var/log/cloud-init-output.log
 
 如需确认工具是否已装好,可在 `status: done` 后检查:
 ```powershell
-multipass exec claude-dev -- bash -lc "node -v; command -v claude; command -v fish"
+multipass exec claude-dev -- bash -lc "command -v claude; command -v opencode; command -v fish"
 ```
 
-> **cloud-init 太慢(>10 分钟)?** 项目只走离线安装,先跑 `.\scripts\prepare-bundle.ps1` 准备离线 bundle(~280MB 含 opencode/cc-pocket,一次性),之后 `delete + start` 走离线模式,cloud-init < 2 分钟。bundle 不齐 `launch.ps1 start` 会直接报错。详见 [bundle.md](bundle.md)。
+> **cloud-init 太慢(>10 分钟)?** 项目只走离线安装,先跑 `.\scripts\prepare-bundle.ps1` 准备离线 bundle(核心 ~180MB,一次性),之后 `delete + start` 走离线模式,cloud-init < 2 分钟。bundle 不齐 `launch.ps1 start` 会直接报错。详见 [bundle.md](bundle.md)。
 
 ## §C 宿主机 .claude 权限锁死,env 同步为空(VM 弹登录菜单)
 

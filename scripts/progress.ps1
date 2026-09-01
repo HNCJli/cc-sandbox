@@ -60,9 +60,9 @@ function Complete-BundleProgress {
     param([hashtable]$Progress)
     if (-not $Progress) { return }
     $events = @($Progress['events'])
-    if ($events -match 'stage:3\|') { Show-ProgressStage -Number 3 -Title '安装 Node.js' }
-    if ($events -match 'stage:4\|') { Show-ProgressStage -Number 4 -Title '安装 Claude Code' }
-    if ($events -match 'stage:5\|') { Show-ProgressStage -Number 5 -Title '安装 opencode' }
+    if ($events -match 'stage:3\|') { Show-ProgressStage -Number 3 -Title '安装 Claude Code' }
+    if ($events -match 'stage:4\|') { Show-ProgressStage -Number 4 -Title '安装 opencode' }
+    if ($events -match 'stage:5\|') { Show-ProgressStage -Number 5 -Title '安装 cc-pocket' }
 }
 
 function Complete-StartupProgress {
