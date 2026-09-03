@@ -43,7 +43,7 @@ VM 里的 Claude Code 按表换算成 `/home/ubuntu/workspace/share-dir-01/test-
 | 特性 id | 装什么 | 装法 |
 |---|---|---|
 | `dev-java` | **SDKMAN** + JDK 17(Adoptium Temurin)+ Maven + 阿里云镜像 | **离线 bundle 优先**(sdkman zip + jdk/maven tarball 预置进 `~/.sdkman/candidates`,秒装);bundle 缺件或 VM 已存在时**回退在线 apt**(几百 MB,首次较慢;apt 装的是 Ubuntu 打包的 OpenJDK 17,非 Temurin,**不带 SDKMAN**——要 SDKMAN 得 delete + start 重建)。Maven 幂等写入 `~/.m2/settings.xml` 镜像(已有配置不覆盖) |
-| `dev-python` | python3(基础镜像自带)+ `uv` | **离线 bundle 优先**(uv wheel 解出二进制);缺件时回退在线 apt+pip。经典 `python3 -m venv` 可用(基础包含 python3.12-venv),包管理仍推荐 uv(`uv venv -p 3.x`/`uv add`) |
+| `dev-python` | python3(基础镜像自带)+ `uv` + C 编译链 + pip/uv 清华镜像 | **离线 bundle 优先**(uv wheel 解出二进制);缺件时回退在线 apt+pip。经典 `python3 -m venv` 可用(基础包含 python3.12-venv),包管理仍推荐 uv(`uv venv -p 3.x`/`uv add`)。C 编译链(gcc/g++/make + python3-dev/libssl-dev/pkg-config)由基础包/在线兜底备齐,无预编译 wheel 的包和 node-gyp 原生模块可现场构建。pip/uv 镜像幂等写入 `~/.config/pip/pip.conf` + `~/.config/uv/uv.toml`(uv 用 `index-url` 字段,新旧版本通吃) |
 | `dev-frontend` | **nvm** + Node 20.x(可多版本)+ `pnpm` 独立二进制 | **离线 bundle 优先**(nvm.sh vendor 件 + node tarball 预置进 `~/.nvm/versions`);缺件时回退在线装(nvm.sh 本地传入 + npmmirror 下 node/pnpm)。pnpm 自含运行时,**与 node 版本解耦**;corepack 已启用,项目内 pnpm/yarn 版本由 packageManager 字段自动切换(交互 shell;非交互桥 `/usr/local/bin/pnpm` 仍是独立二进制) |
 
 版本管理器用法(VM 内交互 shell):
@@ -51,6 +51,7 @@ VM 里的 Claude Code 按表换算成 `/home/ubuntu/workspace/share-dir-01/test-
 - **java**:`sdk list java`(已装版本)、`sdk default java <id>` 切默认(自动跟随到 `/usr/local/bin`)、项目根 `.sdkmanrc` 自动切(`sdkman_auto_env=true` 已开);`JAVA_HOME` 全局可用(/etc/environment + profile.d + fish conf.d 三层,含非交互 shell)
 - **node**:`nvm install/use <ver>`(镜像已配 npmmirror)、`nvm alias default <ver>` 切默认(**切完重跑 start**:`~/.nvm/current` 重指,`/usr/local/bin` 桥与 fish PATH 穿它自动跟随);`nvm install` 的新版本需 `corepack enable` 一次(packageManager 字段感知)
 - **python**:uv 自管(`uv python install 3.x`、`uv venv -p 3.x`)
+- **zoxide**:`z` 跳目录已对 fish(config.fish)和登录 bash(`/etc/profile.d/08-zoxide.sh`)双端 init;注意 `~/.bashrc` 开头有非交互 return,往它末尾追加内容对非交互 `bash -c`(claude 跑命令的方式)不生效——要让 bash 全局可用的配置写 `/etc/profile.d/`
 - 新版本 JDK/Node 离线装:宿主机交互终端重跑 `prepare-bundle.ps1` 选装/追加,再 delete + start(`sdk install java` / `nvm install` 在线源走 GitHub,常不可达)
 
 - **离线件从哪来**:`.\scripts\prepare-bundle.ps1` 交互终端跑一次,菜单里给 JDK/Maven/SDKMAN/uv/pnpm/Node 选装版本(默认跳过,选了才下;非交互跑不会自动下这几百 MB)。装进 VM 的就是当时选定的版本

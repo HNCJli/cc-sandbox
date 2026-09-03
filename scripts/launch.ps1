@@ -100,7 +100,9 @@ $basePackages = @(
     'git', 'curl', 'wget', 'vim', 'less', 'jq', 'ripgrep', 'fd-find',
     'tmux', 'fish', 'fzf', 'zoxide', 'openssh-server', 'sudo', 'locales', 'ca-certificates',
     'unzip', 'zip',   # SDKMAN 安装/运行需要(离线解 zip + sdk install 解候选包)
-    'python3.12-venv'   # 补 ensurepip:经典 python3 -m venv 不再建出无 pip 的残废环境(包管理仍推荐 uv)
+    'python3.12-venv',   # 补 ensurepip:经典 python3 -m venv 不再建出无 pip 的残废环境(包管理仍推荐 uv)
+    # C 编译链兜底(~276MB 磁盘):node-gyp 原生模块、无预编译 wheel 的 Python C 扩展会现场编译,缺 gcc 直接卡死
+    'build-essential', 'python3-dev', 'libssl-dev', 'pkg-config'
 )
 
 # bundle 必需组件清单(单一来源:Test-BundleReady 的宿主侧校验、VM 内 $bundleKeyFiles 校验都由它生成;
@@ -158,7 +160,7 @@ $optionalFeatures = @(
         Id          = 'dev-python'
         Name        = 'Python 环境'
         RebuildOnly = $false
-        Description = '预装 python3 + uv(离线 bundle 秒装;经典 venv 已由基础包 python3.12-venv 补齐,包管理推荐 uv)'
+        Description = '预装 python3 + uv + C 编译链(离线 bundle 秒装;经典 venv 已由基础包 python3.12-venv 补齐,包管理推荐 uv;编译链兜底无 wheel 的 C 扩展)'
         Probe       = 'type -P python3 >/dev/null 2>&1 && type -P uv >/dev/null 2>&1'
         FinishHint  = ''
     }
@@ -765,6 +767,14 @@ function Set-VMClaudeMemory {
         '## 沙箱环境(cc-sandbox 自动生成,勿手改本区块)'
         ''
         '你在 Multipass Ubuntu VM(claude-dev)里运行,不是在用户的 Windows 宿主机上。'
+        ''
+        '### 常用命令行工具(基础包已装)'
+        ''
+        '- 搜索:rg(ripgrep)、fdfind(fd;Ubuntu 二进制名不带 fd 前缀,别误判为未安装)、fzf'
+        '- 其它:tmux、jq、zoxide(`z` 跳目录,仅交互 shell 可用——你跑命令是非交互 bash,z 不在,直接用 cd/绝对路径)、git;用户交互 shell 是 fish,你跑命令走 bash'
+        '- shell 配置双写规则:给交互体验加的东西写 fish 的 ~/.config/fish/config.fish;要让 bash 也用上的(PATH/别名/函数)写 /etc/profile.d/(登录 shell 加载)——注意 ~/.bashrc 开头有非交互 return,追加内容对非交互 shell 无效;系统级 PATH(/usr/local/bin、JAVA_HOME、nvm 桥)对所有进程天生可见,无需配置'
+        '- 共享盘(挂载进来的 workspace)是 sshfs,无执行权限:chmod +x 也跑不了二进制;rg/git 大扫描共享盘也慢。依赖与产物怎么放见下方"工作模式"节'
+        ''
     )
     if (@($Mappings).Count -gt 0) {
         $rows = ($Mappings | ForEach-Object {
@@ -787,6 +797,12 @@ function Set-VMClaudeMemory {
             '- 命中后把前缀部分替换为对应 VM 路径,余下路径的 `\` 换成 `/`。例:`{{EXAMPLE_HOST}}` → `{{EXAMPLE_VM}}`。'.Replace('{{EXAMPLE_HOST}}', $exampleHost).Replace('{{EXAMPLE_VM}}', $exampleVm)
             '- 反向同理:给用户展示文件位置时换算回宿主机路径,方便其在 Windows 侧定位。'
             '- 前缀不在表中的宿主机路径未挂载进 VM,无法访问,应明确告知用户。'
+            ''
+            '### 工作模式(与用户协作)'
+            ''
+            '- 共享盘 workspace 是源码真身:改代码直接落共享盘,用户在宿主机 Windows 立即可见、可验收'
+            '- VM 自测的依赖/产物放本地盘(共享盘 noexec):Python venv → `~/venvs/<proj>`(uv 已配清华镜像,源码仍读共享盘);Node 在 `~/build/<proj>` 建可运行副本再 `pnpm install`(node_modules 不进共享盘,避免污染用户 Windows 侧的);Java 不受限,直接在共享盘 `mvn`/`java -jar`,编译慢再把 target 指到 `~/build`'
+            '- 每自测通过一项,顺手附一句"宿主机怎么跑"的验收命令'
         )
     }
     if (@($DevEnvs).Count -gt 0) {
@@ -794,7 +810,7 @@ function Set-VMClaudeMemory {
         foreach ($id in $DevEnvs) {
             switch ($id) {
                 'dev-java'     { $sections += '- Java:SDKMAN 多版本管理(`sdk list java` 看已装版本、`sdk default java <id>` 切默认、项目根 `.sdkmanrc` 自动切);预置 JDK 17 + Maven,依赖拉取已配阿里云镜像;`JAVA_HOME` 对所有进程可用(含非交互 shell)' }
-                'dev-python'   { $sections += '- Python:系统 python3(`python3 -m venv` 可用);`uv` 在 /usr/local/bin(`uv init` 建项目、`uv add <pkg>` 加依赖、`uv venv -p 3.x` 建指定版本虚拟环境,推荐)' }
+                'dev-python'   { $sections += '- Python:系统 python3(`python3 -m venv` 可用);`uv` 在 /usr/local/bin(`uv init` 建项目、`uv add <pkg>` 加依赖、`uv venv -p 3.x` 建指定版本虚拟环境,推荐;uv/pip 已配清华镜像);C 编译链已备齐(gcc/g++/make + python3-dev/libssl-dev/pkg-config),无预编译 wheel 的包和 node-gyp 原生模块可现场构建' }
                 'dev-frontend' { $sections += '- 前端:nvm 管 Node 多版本(`nvm install/use <ver>` 切换,默认 20.x;非交互 shell 经 `~/.nvm/current` 桥跟随默认版本);`pnpm` 独立二进制全局可用;corepack 已启用,项目内 `packageManager` 字段指定的 pnpm/yarn 版本自动生效' }
             }
         }
@@ -1632,6 +1648,19 @@ chown -R ubuntu:ubuntu /home/ubuntu/.config/fish
     # Python:python3(基础镜像自带)+ uv;经典 venv 由基础包 python3.12-venv 补齐,包管理仍推荐 uv。
     # bundle 离线装好的话这里的探测直接通过;走到安装分支 = bundle 无 uv 或 VM 已存在
     if ($EnabledFeatures -contains 'dev-python') {
+        # pip/uv 镜像配置(幂等,先于探测执行——已装/新装都确保补齐;老 VM 缺配置下次 start 自愈)
+        # uv 配置用 index-url 而非 default-index:default-index 是新版字段,旧版 uv 直接报
+        # "unknown field" 拒绝解析整个文件(踩过);index-url 新旧通吃
+        $pyMirrorScript = 'mkdir -p /home/ubuntu/.config/uv /home/ubuntu/.config/pip && ' +
+            'printf ''index-url = "https://pypi.tuna.tsinghua.edu.cn/simple"\n'' > /home/ubuntu/.config/uv/uv.toml && ' +
+            'printf ''[global]\nindex-url = https://pypi.tuna.tsinghua.edu.cn/simple/\n'' > /home/ubuntu/.config/pip/pip.conf && ' +
+            'chown -R ubuntu:ubuntu /home/ubuntu/.config/uv /home/ubuntu/.config/pip'
+        $r = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'bash', '-c', $pyMirrorScript) -TimeoutSec 30
+        if ($r.TimedOut -or $r.ExitCode -ne 0) {
+            Write-Warn 'pip/uv 镜像配置写入失败(不影响环境安装,下次 start 重试)'
+        } else {
+            Write-Ok 'pip/uv 已配清华镜像(~/.config/uv/uv.toml + pip.conf)'
+        }
         $pyProbe = 'type -P python3 >/dev/null 2>&1 && type -P uv >/dev/null 2>&1'
         if (Test-DevProbe $pyProbe) {
             Write-Ok 'Python 环境已在(python3 + uv)'
@@ -1646,7 +1675,7 @@ chown -R ubuntu:ubuntu /home/ubuntu/.config/fish
         } else {
             Write-Step '安装 Python 环境(在线兜底:python3 + pip)...'
             [void](Update-AptIfNeeded)
-            if (Invoke-DevInstall -InstallArgs (@('sudo', 'apt-get') + $aptLockWait + @('install', '-y', 'python3', 'python3-pip')) -TimeoutSec 600 -Desc 'Python 基础包安装') {
+            if (Invoke-DevInstall -InstallArgs (@('sudo', 'apt-get') + $aptLockWait + @('install', '-y', 'python3', 'python3-pip', 'build-essential', 'python3-dev', 'libssl-dev', 'pkg-config')) -TimeoutSec 900 -Desc 'Python 基础包安装') {
                 Write-Step '安装 uv(pip 清华镜像)...'
                 if (Invoke-DevInstall -InstallArgs @('sudo', 'pip3', 'install', '--break-system-packages', '-i', 'https://pypi.tuna.tsinghua.edu.cn/simple', 'uv') -TimeoutSec 300 -Desc 'uv 安装') {
                     Write-Ok 'Python 环境装好(python3 + uv)'

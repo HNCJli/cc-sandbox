@@ -13,7 +13,7 @@
         JDK 17    Adoptium Temurin tarball,清华镜像(~190MB)→ SDKMAN candidates 预置
         Maven     bin tarball,阿里云 apache 镜像(~9MB)→ SDKMAN candidates 预置
         SDKMAN    cli + native 两 zip(broker 302→GitHub release;GitHub 不通走 ghfast.top 镜像)
-        uv        PyPI manylinux wheel,清华镜像(~35MB)
+        uv        PyPI manylinux wheel,USTC 元数据+清华文件镜像(~35MB)
         pnpm      @pnpm/linux-x64 独立二进制包 npm pack(~26MB,自含运行时,与 node 版本解耦)
         Node      nodejs.org tarball(默认 v20.20.2)→ nvm versions 预置;多版本并存,可交互追加
         nvm       不下载——assets/nvm.sh 已 vendor 进仓库,拷入 bundle 即可
@@ -537,9 +537,12 @@ if ((-not $Force) -and $cachedMvn) {
     }
 }
 
-# --- uv(PyPI wheel,清华镜像;~35MB;VM 内解出二进制)---
+# --- uv(PyPI wheel;~35MB;VM 内解出二进制)---
+# 元数据(版本列表/wheel 直链)走 USTC 镜像 JSON:tuna 的 /pypi/uv/json 实测过期(停在 0.2.x,
+# /simple 与文件层却正常);文件下载仍走 tuna 文件层。USTC JSON 的 asset.url 指向 pythonhosted,
+# 换 tuna 前缀即可下载(路径结构一致,已实测)。
 $uvDir = Join-Path $bundleDir 'uv'
-$tunaPypiJson = 'https://pypi.tuna.tsinghua.edu.cn/pypi/uv/json'
+$uvPypiJson = 'https://mirrors.ustc.edu.cn/pypi/uv/json'
 $cachedUv = Get-ChildItem $uvDir -Filter 'uv-*.whl' -ErrorAction SilentlyContinue | Select-Object -First 1
 $cachedUvVer = $null
 if ($cachedUv -and $cachedUv.Name -match '^uv-(\d+\.\d+\.\d+)-') { $cachedUvVer = $Matches[1] }
@@ -551,22 +554,22 @@ if ((-not $Force) -and $cachedUv) {
     $recentUv = @()
     if ($interactive) {
         try {
-            $uvJson = Invoke-RestMethod -Uri $tunaPypiJson -TimeoutSec 30
+            $uvJson = Invoke-RestMethod -Uri $uvPypiJson -TimeoutSec 30
             $recentUv = @($uvJson.releases.PSObject.Properties.Name |
                 Where-Object { $_ -notmatch '[a-zA-Z]' } |
                 Sort-Object -Property { [version]$_ } -Descending | Select-Object -First 5)
         } catch { Write-Warn "拉取 uv 版本列表失败(离线?):$($_.Exception.Message)" }
     }
-    $pick = Select-OptionalComponentVersion -Prompt 'uv(清华 PyPI 镜像)' -CachedVer $cachedUvVer -Recent $recentUv -ManualPattern '^\d+\.\d+\.\d+$' -ManualExample '0.8.6'
+    $pick = Select-OptionalComponentVersion -Prompt 'uv(USTC PyPI 元数据 + 清华文件镜像)' -CachedVer $cachedUvVer -Recent $recentUv -ManualPattern '^\d+\.\d+\.\d+$' -ManualExample '0.12.9'
     if ($pick -like 'cached:*') {
         Write-Ok "uv 沿用缓存 $($pick.Split(':', 2)[1])"
     } elseif ($pick -eq 'skip') {
         Write-Host '    --  uv:跳过(未缓存;start 勾选 dev-python 时在线兜底)' -ForegroundColor DarkGray
     } else {
-        # 版本 → manylinux x86_64 wheel 的直链(tuna 与 pythonhosted 路径结构一致,换前缀即可)
+        # 版本 → manylinux x86_64 wheel 的直链(JSON 里的 asset.url 指 pythonhosted,换 tuna 前缀下载)
         $uvUrl = $null; $uvFile = $null
         try {
-            if (-not $uvJson) { $uvJson = Invoke-RestMethod -Uri $tunaPypiJson -TimeoutSec 30 }
+            if (-not $uvJson) { $uvJson = Invoke-RestMethod -Uri $uvPypiJson -TimeoutSec 30 }
             $rel = $uvJson.releases.PSObject.Properties[$pick].Value
             $asset = @($rel) | Where-Object { $_.filename -match '^uv-.*-py3-none-manylinux.*x86_64.*\.whl$' } | Select-Object -First 1
             if ($asset) {

@@ -234,6 +234,14 @@ runcmd:
   - update-locale LANG=C.UTF-8
   # 第一阶段只配置基础交互环境；bundle 传输和离线软件安装由 launch.ps1 后续执行
   - printf '%s\n' 'stage=4' 'package=1' 'package_name=Fish 配置完成' > /run/claude-dev/progress && printf '%s\n' 'event=Fish 配置完成' >> /run/claude-dev/events
+  # zoxide init bash:放 /etc/profile.d/(登录 bash 经 profile.d 加载;~/.bashrc 开头 "case $- in
+  # *) return;;" 会拦掉非交互 shell,追加在末尾永远执行不到,故不能只用 .bashrc)。z 函数只对
+  # 交互/登录 shell 有意义(claude 的非交互 bash -c 本就拿不到任何 rc 文件里的函数,直接用 cd);
+  # .bashrc 里的冗余追加段同步清掉,只留 profile.d 单一来源
+  - |
+    printf '# cc-sandbox:zoxide init for bash (fish in config.fish)\neval "$(zoxide init bash)"\n' > /etc/profile.d/08-zoxide.sh
+    sed -i '/# cc-sandbox:zoxide begin/,/# cc-sandbox:zoxide end/d' /home/ubuntu/.bashrc
+    chown ubuntu:ubuntu /home/ubuntu/.bashrc
   - printf '%s\n' 'stage=4' 'package=2' 'package_name=tmux 配置完成' > /run/claude-dev/progress && printf '%s\n' 'event=tmux 配置完成' >> /run/claude-dev/events
   - printf '%s\n' 'stage=4' 'package=3' 'package_name=SSH 配置完成' > /run/claude-dev/progress && printf '%s\n' 'event=SSH 配置完成' >> /run/claude-dev/events
   - printf '%s\n' 'stage=4' 'package=4' 'package_name=Claude 配置同步逻辑完成' > /run/claude-dev/progress && printf '%s\n' 'event=Claude 配置同步逻辑完成' >> /run/claude-dev/events

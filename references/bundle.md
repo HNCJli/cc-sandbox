@@ -23,7 +23,7 @@ bundle 存 cloud-init 离线安装用的本地包,**让 VM 创建不依赖网络
 | `jdk/OpenJDK17U-jdk_x64_linux_hotspot_*.tar.gz` | ~190 MB | Adoptium Temurin JDK 17(清华镜像;预置进 VM 的 SDKMAN candidates) |
 | `maven/apache-maven-*-bin.tar.gz` | ~9 MB | Maven 官方 bin tarball(阿里云 apache 镜像;同样进 SDKMAN) |
 | `sdkman/sdkman-cli-*.zip` + `sdkman-native-*-linuxx64.zip` | ~2 MB | SDKMAN 本体 cli + native(broker 302→GitHub release;GitHub 不通自动走 ghfast.top 镜像) |
-| `uv/uv-*-py3-none-manylinux_x86_64.whl` | ~35 MB | uv(PyPI wheel,清华镜像;VM 内解出二进制装 /usr/local/bin) |
+| `uv/uv-*-py3-none-manylinux_x86_64.whl` | ~35 MB | uv(PyPI wheel,元数据走 USTC 镜像、文件走清华镜像;VM 内解出二进制装 /usr/local/bin) |
 | `pnpm/pnpm-linux-x64-*.tgz` | ~26 MB | pnpm **独立二进制**(@pnpm/linux-x64 平台包,自含运行时;与 node 版本解耦;corepack 已启用,项目内多版本由 packageManager 字段自动切换) |
 | `node/node-vXX.X.X-linux-x64.tar.xz` | ~25 MB/版 | Node 官方 tarball(预置进 VM 的 nvm versions;**多版本并存**,可追加) |
 | `nvm/nvm-vX.X.X.sh` | ~150 KB | nvm 本体(不下载——**vendor 在仓库 `assets/nvm.sh`**,钉版本,自动拷入 bundle) |

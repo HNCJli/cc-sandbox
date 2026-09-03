@@ -391,7 +391,7 @@ Add-Content "$env:USERPROFILE\.cc-sandbox\claude-dev\features.txt" "dev-frontend
 #       "dev-frontend:nvm 已离线安装"、"Node vX 已预置进 nvm"、"pnpm ... 独立二进制已装" 等;Start-DevEnvs 三行"已在"
 
 # (c) 非交互 exec 验证工具链(symlink 桥:不进交互 shell 也要全通)
-multipass exec claude-dev -- bash -c "java -version 2>&1 | head -1; mvn -v 2>/dev/null | head -1; node -v; pnpm -v; uv --version"
+multipass exec claude-dev -- bash -c "java -version 2>&1 | head -1; mvn -v 2>/dev/null | head -1; node -v; pnpm -v; uv --version; gcc --version | head -1"
 multipass exec claude-dev -- bash -c "readlink /usr/local/bin/java /usr/local/bin/node"   # java 走 sdkman current,node 走 ~/.nvm/current(再指向默认版本)
 # java 预期 Temurin:openjdk version "17.0.x" ...(Temurin 标记,不再是 Ubuntu 打包版)
 multipass exec claude-dev -- bash -c "grep -c aliyun /home/ubuntu/.m2/settings.xml"          # 预期 2(id 和 url)
@@ -442,10 +442,10 @@ Move-Item "$env:USERPROFILE\.cc-sandbox\bundle\uv.bak" "$env:USERPROFILE\.cc-san
 |---|---|
 | (a) prepare-bundle | 六个可选件菜单出现(默认跳过,选版本才下);状态汇总各目录 OK(nvm 自动拷贝,无需菜单) |
 | (b) start(新 VM) | "SDKMAN/JDK/Maven/nvm/Node/pnpm 已离线安装"事件 + 探测三行"已在" |
-| (c) 非交互 exec | Temurin 17.0.x / Maven 3.x / Node 20.x / pnpm / uv 全通;java symlink → ~/.sdkman/candidates/java/current/bin/java,node symlink → ~/.nvm/current/bin/node |
+| (c) 非交互 exec | Temurin 17.0.x / Maven 3.x / Node 20.x / pnpm / uv / gcc 13.x 全通;java symlink → ~/.sdkman/candidates/java/current/bin/java,node symlink → ~/.nvm/current/bin/node |
 | (c2) 版本管理器 | `sdk version` 正常、`sdk current java` = 预置 id;`nvm ls` 列预置版本,default 别名 = v20.x |
 | (c3) 全局可见性 | 非交互 exec 有 `JAVA_HOME`;fish 里 `sdk`/JAVA_HOME 可用;`corepack --version` 正常;`python3 -m venv` 建出带 pip 的环境 |
-| (d) 记忆块 | 含 `### 预装开发环境`,三项各一行;java 行提 sdkman、前端行提 nvm/pnpm |
+| (d) 记忆块 | 含 `### 预装开发环境`,三项各一行;java 行提 sdkman、前端行提 nvm/pnpm、python 行提 uv + C 编译链 + 清华镜像;另有 `### 常用命令行工具` 小节(rg/fdfind 命名、共享盘无执行位、bash/fish 双写规则)和 `### 工作模式` 小节(改码落共享盘、自测依赖放本地盘、附宿主机验收命令;有挂载才出现) |
 | (e) 幂等 | 三行"已在",秒级 |
 | (f) status | "开发环境"段三项"已装" |
 | (g) 切默认跟随 | nvm 换 default + 重跑 start 后 `node -v` 跟随;sdkman `.sdkmanrc` + `sdk env` 生效 |
