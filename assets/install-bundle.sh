@@ -2,7 +2,7 @@
 # 离线安装(以 root 运行:sudo bash /tmp/install-bundle.sh [--dev-java] [--dev-python] [--dev-frontend])
 # 架构:AI 工具原生二进制直装(/opt/tools/<name>/<ver>/ + /usr/local/bin symlink),不经 npm/node;
 #       语言运行时归版本管理器——java/maven 进 SDKMAN candidates,node 进 nvm versions,uv 直装,
-#       pnpm 独立二进制(与 node 版本解耦)。
+#       pnpm 独立二进制(与 node 版本解耦;corepack 启用,packageManager 字段生效)。
 # 本脚本只在核心件缺失时执行(launch.ps1 幂等探测),re-run 安全(symlink -f、先 rm 再 mv)。
 set -e
 export PATH=/usr/local/bin:/usr/bin:/bin:/home/ubuntu/.local/bin:$PATH
@@ -189,7 +189,35 @@ EOF
     else
         echo '跳过 Maven:bundle/maven 无 tarball(launch 将在线兜底)' >&2
     fi
-    chown -R ubuntu:ubuntu "$U/.sdkman" 2>/dev/null || true
+
+    # --- JAVA_HOME/sdk 全局可见(三层;与 launch.ps1 Start-DevEnvs 的 heal 块同源,改动需同步)---
+    # 1) /etc/environment:PAM 级静态值(fish/ssh exec/一切会话都拿得到;指 current 软链,换默认版本自动跟随)。
+    #    仅 current 存在才写:apt 兜底装的 java 无 sdkman,写指向缺失路径的 JAVA_HOME 反而有害
+    if [ -L "$U/.sdkman/candidates/java/current" ]; then
+        grep -q '^JAVA_HOME=' /etc/environment 2>/dev/null || \
+            echo 'JAVA_HOME=/home/ubuntu/.sdkman/candidates/java/current' >> /etc/environment
+    fi
+    # 2) profile.d:bash 登录 shell 拿到 sdk 命令 + 解析成真实路径的 JAVA_HOME(少数工具嫌弃软链路径)
+    cat > /etc/profile.d/10-sdkman-java.sh <<'EOF'
+# cc-sandbox:sdkman 全局初始化(bash 登录 shell;非登录场景由 /etc/environment 与 /usr/local/bin 桥覆盖)
+export SDKMAN_DIR="/home/ubuntu/.sdkman"
+[ -s "$SDKMAN_DIR/bin/sdkman-init.sh" ] && . "$SDKMAN_DIR/bin/sdkman-init.sh"
+[ -L "$SDKMAN_DIR/candidates/java/current" ] && \
+    export JAVA_HOME="$(readlink -f "$SDKMAN_DIR/candidates/java/current")"
+EOF
+    # 3) fish conf.d:sdk 桥(sdkman 无 fish 原生 init,经 bash 子 shell)+ JAVA_HOME 解析成真实路径
+    mkdir -p "$U/.config/fish/conf.d"
+    cat > "$U/.config/fish/conf.d/cc-sandbox-sdkman.fish" <<'EOF'
+# cc-sandbox:fish 的 sdk 桥(sdk use 只影响子 shell,切当前 shell 版本无效;切默认用 sdk default,落盘全局生效)
+set -gx SDKMAN_DIR $HOME/.sdkman
+if test -L $HOME/.sdkman/candidates/java/current
+    set -gx JAVA_HOME (readlink -f $HOME/.sdkman/candidates/java/current)
+end
+function sdk
+    bash -c 'source "$HOME/.sdkman/bin/sdkman-init.sh" && sdk "$@"' -- $argv
+end
+EOF
+    chown -R ubuntu:ubuntu "$U/.sdkman" "$U/.config/fish" 2>/dev/null || true
 fi
 
 if [ -n "$want_python" ]; then
@@ -250,10 +278,19 @@ if [ -n "$want_frontend" ]; then
             if [ -n "$def" ]; then
                 mkdir -p "$U/.nvm/alias"
                 echo "$def" > "$U/.nvm/alias/default"
-                # 非交互桥:multipass exec 走 /usr/local/bin;nvm 无 current 链接,
-                # 由 launch.ps1 每次 start 按默认别名重指(切版本后重跑 start 跟随)
-                for b in node npm npx; do ln -sfn "$U/.nvm/versions/node/$def/bin/$b" "/usr/local/bin/$b"; done
-                printf '%s\n' "event=dev-frontend:Node 默认版本 $def(/usr/local/bin 已桥接)" >> /run/claude-dev/events
+                # current 指针(与 sdkman 同思路):/usr/local/bin 桥、fish PATH、corepack 全走它,
+                # 换默认版本只重指这一处(launch.ps1 每次 start 按默认别名重指,切版本后重跑 start 跟随)
+                ln -sfn "$U/.nvm/versions/node/$def" "$U/.nvm/current"
+                # 非交互桥:multipass exec 走 /usr/local/bin,穿 current 自动跟随默认版本
+                for b in node npm npx; do ln -sfn "$U/.nvm/current/bin/$b" "/usr/local/bin/$b"; done
+                # corepack 启用(node 自带但默认未启用):package.json 的 packageManager 字段真正生效。
+                # shim 落在版本 bin 目录(owner=ubuntu);交互 shell(nvm/fish 把版本 bin 排前)里
+                # pnpm/yarn 走 corepack,非交互桥 /usr/local/bin/pnpm 仍是独立二进制兜底。
+                # 注意:nvm 新装的版本不带 shim,需对该版本重跑 corepack enable
+                if ! sudo -u ubuntu "$U/.nvm/versions/node/$def/bin/corepack" enable --install-directory "$U/.nvm/versions/node/$def/bin"; then
+                    echo 'WARN: corepack enable 失败(packageManager 字段不生效,pnpm 走独立二进制)' >&2
+                fi
+                printf '%s\n' "event=dev-frontend:Node 默认版本 $def(/usr/local/bin 经 current 桥接,corepack 已启用)" >> /run/claude-dev/events
             fi
         fi
     else
@@ -261,7 +298,22 @@ if [ -n "$want_frontend" ]; then
     fi
     chown -R ubuntu:ubuntu "$U/.nvm" 2>/dev/null || true
 
-    # --- pnpm 独立二进制(自含运行时,与 node 版本解耦;项目内多版本 pnpm 自己管)---
+    # corepack 下载走 npmmirror(PAM 级;corepack 按需拉 pnpm/yarn 版本时默认 registry.npmjs.org,国内慢;
+    # 与 launch.ps1 heal 块同源,改动需同步)
+    grep -q '^COREPACK_NPM_REGISTRY=' /etc/environment 2>/dev/null || \
+        echo 'COREPACK_NPM_REGISTRY=https://registry.npmmirror.com' >> /etc/environment
+    # fish PATH 挂 nvm current 版本 bin:node 解析与 /usr/local/bin 桥同目标,
+    # 额外得到 corepack shim(pnpm/yarn 感知 packageManager 字段)
+    mkdir -p "$U/.config/fish/conf.d"
+    cat > "$U/.config/fish/conf.d/cc-sandbox-nvm.fish" <<'EOF'
+# cc-sandbox:nvm current 版本 bin 进 PATH(current 由 launch.ps1 start 按 nvm 默认别名重指)
+if test -d $HOME/.nvm/current/bin
+    fish_add_path $HOME/.nvm/current/bin
+end
+EOF
+    chown -R ubuntu:ubuntu "$U/.config/fish" 2>/dev/null || true
+
+    # --- pnpm 独立二进制(自含运行时,与 node 版本解耦;项目内多版本由 corepack 按 packageManager 字段切换)---
     pnpm_tgz=$(find "$B/pnpm" -maxdepth 1 -name 'pnpm-linux-x64-*.tgz' 2>/dev/null | head -1)
     if [ -n "$pnpm_tgz" ]; then
         pnpm_ver=$(basename "$pnpm_tgz" | sed 's/^pnpm-linux-x64-\(.*\)\.tgz$/\1/')
@@ -271,8 +323,15 @@ if [ -n "$want_frontend" ]; then
            chmod 755 /opt/tools/pnpm/"$pnpm_ver"/pnpm &&
            ln -sfn /opt/tools/pnpm/"$pnpm_ver"/pnpm /usr/local/bin/pnpm &&
            pnpm --version >/dev/null 2>&1; then
-            # npmmirror registry:pnpm 自切多版本(packageManager 字段)时从国内源拉
+            # npmmirror registry:pnpm 拉包走国内源(corepack 拉 pnpm/yarn 版本走 COREPACK_NPM_REGISTRY,见上)
             sudo -u ubuntu pnpm config set --global registry https://registry.npmmirror.com 2>/dev/null || true
+            # corepack 默认版本对齐独立二进制:无 packageManager 字段时 shell 内外版本一致;
+            # 需联网(npmmirror),失败不致命——corepack 已 enable,首次用时现拉
+            if [ -x "$U/.nvm/current/bin/corepack" ]; then
+                sudo -u ubuntu COREPACK_NPM_REGISTRY=https://registry.npmmirror.com \
+                    "$U/.nvm/current/bin/corepack" prepare "pnpm@$pnpm_ver" --activate 2>/dev/null || \
+                    echo 'WARN: corepack prepare 失败(交互 shell 首次用 pnpm 会现下载)' >&2
+            fi
             printf '%s\n' "event=dev-frontend:pnpm $pnpm_ver 独立二进制已装(/opt/tools/pnpm)" >> /run/claude-dev/events
         else
             echo 'WARN: pnpm 独立二进制安装或自检失败(launch 将在线兜底)' >&2

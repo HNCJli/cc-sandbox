@@ -392,13 +392,19 @@ Add-Content "$env:USERPROFILE\.cc-sandbox\claude-dev\features.txt" "dev-frontend
 
 # (c) 非交互 exec 验证工具链(symlink 桥:不进交互 shell 也要全通)
 multipass exec claude-dev -- bash -c "java -version 2>&1 | head -1; mvn -v 2>/dev/null | head -1; node -v; pnpm -v; uv --version"
-multipass exec claude-dev -- bash -c "readlink -f /usr/local/bin/java /usr/local/bin/node"   # java 走 sdkman current,node 走 nvm default
+multipass exec claude-dev -- bash -c "readlink /usr/local/bin/java /usr/local/bin/node"   # java 走 sdkman current,node 走 ~/.nvm/current(再指向默认版本)
 # java 预期 Temurin:openjdk version "17.0.x" ...(Temurin 标记,不再是 Ubuntu 打包版)
 multipass exec claude-dev -- bash -c "grep -c aliyun /home/ubuntu/.m2/settings.xml"          # 预期 2(id 和 url)
 
 # (c2) 交互 shell 验证版本管理器(登录 shell 才有 sdk/nvm 函数)
 multipass exec claude-dev -- sudo -u ubuntu bash -lc "source /home/ubuntu/.sdkman/bin/sdkman-init.sh 2>/dev/null; sdk version | head -2; sdk current java"
 multipass exec claude-dev -- sudo -u ubuntu bash -lc "source /home/ubuntu/.nvm/nvm.sh; nvm ls; cat /home/ubuntu/.nvm/alias/default"
+
+# (c3) 环境变量与 corepack 全局可见(JAVA_HOME/sdk/corepack/venv 修复回归)
+multipass exec claude-dev -- bash -c 'echo "JAVA_HOME=$JAVA_HOME"'                          # 非空(/etc/environment 经 PAM 注入,指 sdkman current)
+multipass exec claude-dev -- sudo -u ubuntu fish -c 'echo $JAVA_HOME; sdk version'           # fish:JAVA_HOME + sdk 桥均可用
+multipass exec claude-dev -- sudo -u ubuntu bash -lc 'command -v sdk && corepack --version'  # 登录 shell 有 sdk;corepack 已启用
+multipass exec claude-dev -- bash -c "python3 -m venv /tmp/_v && /tmp/_v/bin/pip --version && rm -rf /tmp/_v"   # 经典 venv 不再残废
 
 # (d) 记忆块含"预装开发环境"节(三项各一行,提 sdkman/nvm 用法)
 multipass exec claude-dev -- bash -c "sed -n '/cc-sandbox:begin/,/cc-sandbox:end/p' /home/ubuntu/.claude/CLAUDE.md"
@@ -426,7 +432,7 @@ Move-Item "$env:USERPROFILE\.cc-sandbox\bundle\uv" "$env:USERPROFILE\.cc-sandbox
 .\scripts\launch.ps1 delete
 .\scripts\launch.ps1 start      # 预期:uv 走"在线兜底"提示并 pip 安装成功
 multipass exec claude-dev -- bash -c "uv --version && uv venv /tmp/uvtest && rm -rf /tmp/uvtest"   # uv 可用,uv venv 正常
-multipass exec claude-dev -- bash -c "dpkg -l python3-venv 2>/dev/null | grep -c '^ii'"           # 预期 0:在线兜底不装 apt 的 python3-venv
+multipass exec claude-dev -- bash -c "dpkg -l python3.12-venv 2>/dev/null | grep -c '^ii'"        # 预期 1:基础包已装(在线兜底不再额外装)
 Move-Item "$env:USERPROFILE\.cc-sandbox\bundle\uv.bak" "$env:USERPROFILE\.cc-sandbox\bundle\uv" -Force
 ```
 
@@ -436,14 +442,15 @@ Move-Item "$env:USERPROFILE\.cc-sandbox\bundle\uv.bak" "$env:USERPROFILE\.cc-san
 |---|---|
 | (a) prepare-bundle | 六个可选件菜单出现(默认跳过,选版本才下);状态汇总各目录 OK(nvm 自动拷贝,无需菜单) |
 | (b) start(新 VM) | "SDKMAN/JDK/Maven/nvm/Node/pnpm 已离线安装"事件 + 探测三行"已在" |
-| (c) 非交互 exec | Temurin 17.0.x / Maven 3.x / Node 20.x / pnpm / uv 全通;java symlink → ~/.sdkman/candidates/java/current/bin/java,node symlink → ~/.nvm/versions/node/<default>/bin/node |
+| (c) 非交互 exec | Temurin 17.0.x / Maven 3.x / Node 20.x / pnpm / uv 全通;java symlink → ~/.sdkman/candidates/java/current/bin/java,node symlink → ~/.nvm/current/bin/node |
 | (c2) 版本管理器 | `sdk version` 正常、`sdk current java` = 预置 id;`nvm ls` 列预置版本,default 别名 = v20.x |
+| (c3) 全局可见性 | 非交互 exec 有 `JAVA_HOME`;fish 里 `sdk`/JAVA_HOME 可用;`corepack --version` 正常;`python3 -m venv` 建出带 pip 的环境 |
 | (d) 记忆块 | 含 `### 预装开发环境`,三项各一行;java 行提 sdkman、前端行提 nvm/pnpm |
 | (e) 幂等 | 三行"已在",秒级 |
 | (f) status | "开发环境"段三项"已装" |
 | (g) 切默认跟随 | nvm 换 default + 重跑 start 后 `node -v` 跟随;sdkman `.sdkmanrc` + `sdk env` 生效 |
 | (h) 关闭单项 | grep 计数 0;包仍留在 VM 里(pnpm -v 仍可用) |
-| (i) 兜底 | uv 提示"在线兜底"并装上,`uv venv` 正常;python3-venv 未装(dpkg 计数 0);其余离线件不受影响 |
+| (i) 兜底 | uv 提示"在线兜底"并装上,`uv venv` 正常;python3.12-venv 基础包已装(dpkg 计数 1);其余离线件不受影响 |
 
 **prepare-bundle 版本菜单**(需真人终端):裸跑 `.\scripts\prepare-bundle.ps1 -Force` 应依次弹核心三件(Claude Code/opencode/cc-pocket)+ 六个可选件的单选菜单(TUI,窗口小自动降级编号输入;Node 段还会弹"追加第二版本"询问,默认跳过);非交互(如 `cmd /c ".\scripts\prepare-bundle.ps1 < nul"`,不加 -Force)不弹菜单,核心件沿用缓存或下最新,可选件无缓存时打印"跳过"提示。
 

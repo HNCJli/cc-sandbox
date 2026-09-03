@@ -99,7 +99,8 @@ $clipBridgePort  = 18339                                # 剪贴板桥端口(宿
 $basePackages = @(
     'git', 'curl', 'wget', 'vim', 'less', 'jq', 'ripgrep', 'fd-find',
     'tmux', 'fish', 'fzf', 'zoxide', 'openssh-server', 'sudo', 'locales', 'ca-certificates',
-    'unzip', 'zip'   # SDKMAN 安装/运行需要(离线解 zip + sdk install 解候选包)
+    'unzip', 'zip',   # SDKMAN 安装/运行需要(离线解 zip + sdk install 解候选包)
+    'python3.12-venv'   # 补 ensurepip:经典 python3 -m venv 不再建出无 pip 的残废环境(包管理仍推荐 uv)
 )
 
 # bundle 必需组件清单(单一来源:Test-BundleReady 的宿主侧校验、VM 内 $bundleKeyFiles 校验都由它生成;
@@ -157,7 +158,7 @@ $optionalFeatures = @(
         Id          = 'dev-python'
         Name        = 'Python 环境'
         RebuildOnly = $false
-        Description = '预装 python3 + uv(离线 bundle 秒装;uv 自带 venv/包管理,不装 apt venv)'
+        Description = '预装 python3 + uv(离线 bundle 秒装;经典 venv 已由基础包 python3.12-venv 补齐,包管理推荐 uv)'
         Probe       = 'type -P python3 >/dev/null 2>&1 && type -P uv >/dev/null 2>&1'
         FinishHint  = ''
     }
@@ -792,9 +793,9 @@ function Set-VMClaudeMemory {
         $sections += @('', '### 预装开发环境', '')
         foreach ($id in $DevEnvs) {
             switch ($id) {
-                'dev-java'     { $sections += '- Java:SDKMAN 多版本管理(`sdk list java` 看已装版本、`sdk default java <id>` 切默认、项目根 `.sdkmanrc` 自动切);预置 JDK 17 + Maven,依赖拉取已配阿里云镜像' }
-                'dev-python'   { $sections += '- Python:系统 python3;`uv` 在 /usr/local/bin(`uv init` 建项目、`uv add <pkg>` 加依赖、`uv venv -p 3.x` 建指定版本虚拟环境)' }
-                'dev-frontend' { $sections += '- 前端:nvm 管 Node 多版本(`nvm install/use <ver>` 切换,默认 20.x);`pnpm` 独立二进制全局可用,项目内 pnpm 版本由 packageManager 字段自管' }
+                'dev-java'     { $sections += '- Java:SDKMAN 多版本管理(`sdk list java` 看已装版本、`sdk default java <id>` 切默认、项目根 `.sdkmanrc` 自动切);预置 JDK 17 + Maven,依赖拉取已配阿里云镜像;`JAVA_HOME` 对所有进程可用(含非交互 shell)' }
+                'dev-python'   { $sections += '- Python:系统 python3(`python3 -m venv` 可用);`uv` 在 /usr/local/bin(`uv init` 建项目、`uv add <pkg>` 加依赖、`uv venv -p 3.x` 建指定版本虚拟环境,推荐)' }
+                'dev-frontend' { $sections += '- 前端:nvm 管 Node 多版本(`nvm install/use <ver>` 切换,默认 20.x;非交互 shell 经 `~/.nvm/current` 桥跟随默认版本);`pnpm` 独立二进制全局可用;corepack 已启用,项目内 `packageManager` 字段指定的 pnpm/yarn 版本自动生效' }
             }
         }
     }
@@ -1492,13 +1493,15 @@ if [ ! -s "$U/.nvm/nvm.sh" ] && [ -s /tmp/nvm.sh ]; then
     grep -q 'NVM_DIR' "$U/.bashrc" 2>/dev/null || \
         printf '\nexport NVM_DIR="$HOME/.nvm"\nexport NVM_NODEJS_ORG_MIRROR=https://npmmirror.com/mirrors/node\n[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"\n' >> "$U/.bashrc"
 fi
-# Node 20(若缺):npmmirror 镜像直解进 nvm versions
+# Node 20(若缺):npmmirror 镜像直解进 nvm versions;current 指针 + /usr/local/bin 桥穿 current
+# (corepack/fish PATH/环境变量由 Start-DevEnvs 的 heal 块统一补,此处不重复)
 if [ ! -x /usr/local/bin/node ] && [ -s "$U/.nvm/nvm.sh" ]; then
     ver=v20.20.2
     mkdir -p "$U/.nvm/versions/node/$ver" "$U/.nvm/alias"
     curl -fsSL "https://registry.npmmirror.com/-/binary/node/$ver/node-$ver-linux-x64.tar.xz" | tar -xJ -C "$U/.nvm/versions/node/$ver" --strip-components=1
     echo "$ver" > "$U/.nvm/alias/default"
-    for b in node npm npx; do ln -sfn "$U/.nvm/versions/node/$ver/bin/$b" "/usr/local/bin/$b"; done
+    ln -sfn "$U/.nvm/versions/node/$ver" "$U/.nvm/current"
+    for b in node npm npx; do ln -sfn "$U/.nvm/current/bin/$b" "/usr/local/bin/$b"; done
 fi
 chown -R ubuntu:ubuntu "$U/.nvm" 2>/dev/null || true
 # pnpm 独立二进制(若缺):npmmirror registry tarball(@pnpm/linux-x64 平台包)
@@ -1512,7 +1515,8 @@ pnpm -v >/dev/null 2>&1 && node -v >/dev/null 2>&1
 '@
         $scriptHost = Join-Path $env:TEMP 'cc-sandbox-fe-fallback.sh'
         $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-        [System.IO.File]::WriteAllText($scriptHost, $feScript, $utf8NoBom)
+        # here-string 随本文件行尾(CRLF);bash 吃 CRLF 会炸,写出前统一归一化成 LF
+        [System.IO.File]::WriteAllText($scriptHost, ($feScript -replace "`r`n", "`n"), $utf8NoBom)
         $nvmHost = Join-Path $assetsDir 'nvm.sh'
         if (-not (Test-Path $nvmHost)) { Write-Warn "缺 assets/nvm.sh($nvmHost)"; return $false }
         $t1 = Invoke-Multipass -ArgumentList @('transfer', $nvmHost, "${vmName}:/tmp/nvm.sh") -TimeoutSec 30
@@ -1549,6 +1553,49 @@ pnpm -v >/dev/null 2>&1 && node -v >/dev/null 2>&1
                 $ready += 'dev-java'
             }
         }
+        # JAVA_HOME/sdk 全局可见性文件(老 VM 补齐;与 install-bundle.sh dev-java 段同源,改动需同步)。
+        # 幂等,每次 start 都刷:三层 = /etc/environment(PAM 级)+ profile.d(bash 登录)+ fish conf.d(sdk 桥)
+        if ($ready -contains 'dev-java') {
+            $javaEnvScript = @'
+# 仅 current 存在才写 JAVA_HOME:apt 兜底装的 java 无 sdkman,写指向缺失路径的 JAVA_HOME 反而有害
+if [ -L /home/ubuntu/.sdkman/candidates/java/current ]; then
+    grep -q '^JAVA_HOME=' /etc/environment 2>/dev/null || \
+        echo 'JAVA_HOME=/home/ubuntu/.sdkman/candidates/java/current' >> /etc/environment
+fi
+cat > /etc/profile.d/10-sdkman-java.sh <<'EOF'
+# cc-sandbox:sdkman 全局初始化(bash 登录 shell;非登录场景由 /etc/environment 与 /usr/local/bin 桥覆盖)
+export SDKMAN_DIR="/home/ubuntu/.sdkman"
+[ -s "$SDKMAN_DIR/bin/sdkman-init.sh" ] && . "$SDKMAN_DIR/bin/sdkman-init.sh"
+[ -L "$SDKMAN_DIR/candidates/java/current" ] && \
+    export JAVA_HOME="$(readlink -f "$SDKMAN_DIR/candidates/java/current")"
+EOF
+mkdir -p /home/ubuntu/.config/fish/conf.d
+cat > /home/ubuntu/.config/fish/conf.d/cc-sandbox-sdkman.fish <<'EOF'
+# cc-sandbox:fish 的 sdk 桥(sdk use 只影响子 shell,切当前 shell 版本无效;切默认用 sdk default,落盘全局生效)
+set -gx SDKMAN_DIR $HOME/.sdkman
+if test -L $HOME/.sdkman/candidates/java/current
+    set -gx JAVA_HOME (readlink -f $HOME/.sdkman/candidates/java/current)
+end
+function sdk
+    bash -c 'source "$HOME/.sdkman/bin/sdkman-init.sh" && sdk "$@"' -- $argv
+end
+EOF
+chown -R ubuntu:ubuntu /home/ubuntu/.config/fish
+'@
+            $javaEnvHost = Join-Path $env:TEMP 'cc-sandbox-java-env.sh'
+            $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+            # here-string 随本文件行尾(CRLF);bash 吃 CRLF 会炸,写出前统一归一化成 LF
+            [System.IO.File]::WriteAllText($javaEnvHost, ($javaEnvScript -replace "`r`n", "`n"), $utf8NoBom)
+            $jt = Invoke-Multipass -ArgumentList @('transfer', $javaEnvHost, "${vmName}:/tmp/cc-sandbox-java-env.sh") -TimeoutSec 30
+            if ($jt.TimedOut -or $jt.ExitCode -ne 0) {
+                Write-Warn 'Java 环境变量脚本传入 VM 失败(JAVA_HOME/sdk 全局可见未生效;重跑 start 自愈)'
+            } else {
+                $jr = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'sudo', 'bash', '/tmp/cc-sandbox-java-env.sh') -TimeoutSec 60
+                if ($jr.TimedOut -or $jr.ExitCode -ne 0) {
+                    Write-Warn "Java 环境变量写入失败:$($jr.Stderr)(JAVA_HOME/sdk 全局可见未生效;重跑 start 自愈)"
+                }
+            }
+        }
         # Maven 阿里云镜像(国内拉依赖必需;幂等:已有 settings.xml 不覆盖)
         if ((Test-FeatureInVm -Probe 'test -f ~/.m2/settings.xml') -ne $true) {
             $mavenSettings = @'
@@ -1582,7 +1629,7 @@ pnpm -v >/dev/null 2>&1 && node -v >/dev/null 2>&1
         }
     }
 
-    # Python:python3(基础镜像自带)+ uv;venv/包管理全走 uv,不依赖 apt 的 python3-venv。
+    # Python:python3(基础镜像自带)+ uv;经典 venv 由基础包 python3.12-venv 补齐,包管理仍推荐 uv。
     # bundle 离线装好的话这里的探测直接通过;走到安装分支 = bundle 无 uv 或 VM 已存在
     if ($EnabledFeatures -contains 'dev-python') {
         $pyProbe = 'type -P python3 >/dev/null 2>&1 && type -P uv >/dev/null 2>&1'
@@ -1634,13 +1681,48 @@ pnpm -v >/dev/null 2>&1 && node -v >/dev/null 2>&1
                 }
             }
         }
-        # nvm 默认别名 → /usr/local/bin 桥重指(nvm 无 current 链接;
-        # 用户 `nvm alias default <ver>` 换默认后重跑 start 即跟随)。
-        # 别名文件存的是用户原始输入(可能是 "22" 这种短形式),必须经 nvm 解析成完整版本号
-        $refresh = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'sudo', 'bash', '-c',
-            'd=$(bash -c ". /home/ubuntu/.nvm/nvm.sh >/dev/null 2>&1 && nvm version default" 2>/dev/null); if [ -n "$d" ] && [ "$d" != "none" ] && [ -d "/home/ubuntu/.nvm/versions/node/$d" ]; then for b in node npm npx; do ln -sfn "/home/ubuntu/.nvm/versions/node/$d/bin/$b" "/usr/local/bin/$b"; done; fi') -TimeoutSec 60
-        if ($refresh.TimedOut -or $refresh.ExitCode -ne 0) {
-            Write-Warn 'node 桥接 symlink 刷新失败(不影响 VM 内交互使用 nvm)'
+        # nvm 默认别名 → ~/.nvm/current 重指(/usr/local/bin 桥与 fish PATH 穿 current 自动跟随;
+        # 用户 `nvm alias default <ver>` 换默认后重跑 start 即跟随;老 VM 顺带从"钉死版本"桥迁移)。
+        # 别名文件存的是用户原始输入(可能是 "22" 这种短形式),必须经 nvm 解析成完整版本号。
+        # 同块幂等补齐(与 install-bundle.sh dev-frontend 段同源,改动需同步):
+        # corepack enable + 默认版本对齐独立 pnpm + npmmirror 注册表 + fish PATH 配置
+        $feHealScript = @'
+d=$(bash -c ". /home/ubuntu/.nvm/nvm.sh >/dev/null 2>&1 && nvm version default" 2>/dev/null)
+if [ -n "$d" ] && [ "$d" != "none" ] && [ -d "/home/ubuntu/.nvm/versions/node/$d" ]; then
+    ln -sfn "/home/ubuntu/.nvm/versions/node/$d" /home/ubuntu/.nvm/current
+    for b in node npm npx; do ln -sfn "/home/ubuntu/.nvm/current/bin/$b" "/usr/local/bin/$b"; done
+    sudo -u ubuntu "/home/ubuntu/.nvm/versions/node/$d/bin/corepack" enable \
+        --install-directory "/home/ubuntu/.nvm/versions/node/$d/bin" 2>/dev/null || true
+    pv=$(/usr/local/bin/pnpm --version 2>/dev/null)
+    if [ -n "$pv" ] && ! sudo -u ubuntu test -d "/home/ubuntu/.cache/node/corepack/v1/pnpm/$pv"; then
+        sudo -u ubuntu COREPACK_NPM_REGISTRY=https://registry.npmmirror.com \
+            "/home/ubuntu/.nvm/versions/node/$d/bin/corepack" prepare "pnpm@$pv" --activate 2>/dev/null || true
+    fi
+    chown -h ubuntu:ubuntu /home/ubuntu/.nvm/current 2>/dev/null || true
+fi
+grep -q '^COREPACK_NPM_REGISTRY=' /etc/environment 2>/dev/null || \
+    echo 'COREPACK_NPM_REGISTRY=https://registry.npmmirror.com' >> /etc/environment
+mkdir -p /home/ubuntu/.config/fish/conf.d
+cat > /home/ubuntu/.config/fish/conf.d/cc-sandbox-nvm.fish <<'EOF'
+# cc-sandbox:nvm current 版本 bin 进 PATH(current 由 launch.ps1 start 按 nvm 默认别名重指)
+if test -d $HOME/.nvm/current/bin
+    fish_add_path $HOME/.nvm/current/bin
+end
+EOF
+chown -R ubuntu:ubuntu /home/ubuntu/.config/fish
+'@
+        $feHealHost = Join-Path $env:TEMP 'cc-sandbox-fe-heal.sh'
+        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        # here-string 随本文件行尾(CRLF);bash 吃 CRLF 会炸,写出前统一归一化成 LF
+        [System.IO.File]::WriteAllText($feHealHost, ($feHealScript -replace "`r`n", "`n"), $utf8NoBom)
+        $ft = Invoke-Multipass -ArgumentList @('transfer', $feHealHost, "${vmName}:/tmp/cc-sandbox-fe-heal.sh") -TimeoutSec 30
+        if ($ft.TimedOut -or $ft.ExitCode -ne 0) {
+            Write-Warn '前端环境补齐脚本传入 VM 失败(node 桥/corepack 未刷新;不影响 VM 内交互使用 nvm)'
+        } else {
+            $refresh = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'sudo', 'bash', '/tmp/cc-sandbox-fe-heal.sh') -TimeoutSec 120
+            if ($refresh.TimedOut -or $refresh.ExitCode -ne 0) {
+                Write-Warn 'node 桥接/corepack 刷新失败(不影响 VM 内交互使用 nvm)'
+            }
         }
     }
     return ,@($ready)
