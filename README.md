@@ -60,6 +60,7 @@ function vm { & "$env:USERPROFILE\.claude\skills\cc-sandbox\scripts\launch.ps1" 
 ├─ assets/                     (状态目录固定 %USERPROFILE%\.cc-sandbox,不可更换)
 │  ├─ cloud-init.yaml          (cloud-init 模板,launch.ps1 渲染)
 │  ├─ install-bundle.sh
+│  ├─ vmdeps.sh                (共享盘 Node 项目 node_modules → ~/deps bind mount 传送门,装进 VM 成 vmdeps 命令)
 │  ├─ statusline.sh
 │  ├─ tmux.conf
 │  ├─ mounts.example.txt

@@ -527,6 +527,68 @@ Remove-Item "$env:USERPROFILE\.cc-sandbox\dev-t3" -Recurse -Force
 
 ---
 
+## 测试 12:vmdeps 依赖传送门 + fd 命名(建议跑)
+
+**目的**:验证共享盘 Node 项目的"零副本直测"链路——vmdeps 传送门挂载、pnpm install 依赖落 VM 本地盘、Windows 侧零污染、Windows 改码 VM 即读最新;fd 链接在 fish/bash/非交互 shell 三端同名;记忆块含 vmdeps 用法。
+
+### 步骤
+
+```powershell
+# (a) start 收尾应有 vmdeps 三行输出(装机/开机自愈/补挂)
+.\scripts\launch.ps1 start
+# 预期:"vmdeps → /usr/local/bin(→ fdfind 链接就位)"、"vmdeps.service 开机自愈已启用"、
+#       "vmdeps 传送门已按注册表补挂"(新 VM 无注册项目,空跑也算成功)
+
+# (b) fd 三端同名(非交互 exec / 登录 bash / fish)
+multipass exec claude-dev -- bash -c "fd --version && readlink /usr/local/bin/fd"   # 版本号 + /usr/bin/fdfind
+multipass exec claude-dev -- sudo -u ubuntu fish -c "fd --version"                  # fish 同样敲得出
+
+# (c) systemd 自愈单元已启用
+multipass exec claude-dev -- bash -c "systemctl is-enabled vmdeps.service"          # 预期 enabled
+
+# (d) e2e:共享盘建玩具项目(monorepo 双包)→ mount → pnpm install → 跑依赖 → Windows 改码看最新
+New-Item -ItemType Directory -Force F:\<共享目录>\vmdeps-e2e\packages\sub-a | Out-Null
+Set-Content F:\<共享目录>\vmdeps-e2e\package.json '{"name":"e2e-root","private":true,"dependencies":{"is-odd":"^1.0.0"}}'
+Set-Content F:\<共享目录>\vmdeps-e2e\app.js 'console.log("V1")'
+Set-Content F:\<共享目录>\vmdeps-e2e\packages\sub-a\package.json '{"name":"sub-a","version":"1.0.0"}'
+multipass exec claude-dev -- bash -lc 'vmdeps mount vmdeps-e2e && vmdeps status'
+# 预期:两行"传送门: node_modules → ..."与"传送门: packages/sub-a/node_modules → ...";status 2/2
+
+multipass exec claude-dev -- bash -lc 'cd ~/workspace/*/vmdeps-e2e && pnpm install && node app.js'
+# 预期:is-odd 装上(pnpm 正常输出);输出 V1
+
+# (e) Windows 侧零污染 + 改码即读最新(核心诉求:不存在旧副本)
+Get-ChildItem F:\<共享目录>\vmdeps-e2e\node_modules -Force | Measure-Object | % Count   # 预期 0(依赖只在 VM 本地盘)
+Set-Content F:\<共享目录>\vmdeps-e2e\app.js 'console.log("V2-MODIFIED-ON-WINDOWS")'
+multipass exec claude-dev -- bash -lc 'node ~/workspace/*/vmdeps-e2e/app.js'            # 预期 V2-MODIFIED-ON-WINDOWS
+
+# (f) 幂等与自愈:重复 mount 不重挂不报错;unmount 后 auto 秒回
+multipass exec claude-dev -- bash -lc 'vmdeps mount vmdeps-e2e && vmdeps unmount vmdeps-e2e && vmdeps auto && vmdeps status'
+# 预期:重复 mount 无报错;unmount 列两条"已卸";auto 静默成功;status 仍列出且 2/2(auto 重挂回来了)
+
+# (g) 记忆块断言:工具行提 vmdeps、工作模式节提"直接在共享盘项目目录 pnpm install"
+multipass exec claude-dev -- bash -c "sed -n '/cc-sandbox:begin/,/cc-sandbox:end/p' /home/ubuntu/.claude/CLAUDE.md | grep -c vmdeps"
+# 预期 ≥ 2
+
+# (h) 清理
+multipass exec claude-dev -- bash -lc 'vmdeps unmount vmdeps-e2e && rm -rf ~/deps/*/vmdeps-e2e'
+Remove-Item -Recurse -Force F:\<共享目录>\vmdeps-e2e
+```
+
+### 预期汇总
+
+| 检查项 | 预期 |
+|---|---|
+| (a) start 输出 | vmdeps 三行(fdfind 链接 / systemd 自愈 / 按注册表补挂) |
+| (b) fd 三端 | 非交互 bash、fish 敲 `fd` 同名可用,readlink → /usr/bin/fdfind |
+| (c) 自愈单元 | vmdeps.service enabled |
+| (d) e2e | monorepo 双包 2/2 传送门;pnpm install 正常;app.js 跑通 |
+| (e) 零污染 + 最新码 | Windows 侧 node_modules 空(0 项);改 app.js 后 VM 立刻读新值 |
+| (f) 幂等/自愈 | mount 重跑无副作用;unmount→auto 后 status 仍 2/2 |
+| (g) 记忆块 | vmdeps 出现 ≥ 2 处(工具行 + 工作模式行) |
+
+---
+
 ## 发现问题怎么办
 
 按现象查 [troubleshooting.md](./troubleshooting.md):

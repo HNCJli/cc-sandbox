@@ -770,10 +770,11 @@ function Set-VMClaudeMemory {
         ''
         '### 常用命令行工具(基础包已装)'
         ''
-        '- 搜索:rg(ripgrep)、fdfind(fd;Ubuntu 二进制名不带 fd 前缀,别误判为未安装)、fzf'
+        '- 搜索:rg(ripgrep)、fd(链接到 fdfind,装在 /usr/local/bin/fd,fish/bash/非交互 shell 敲 fd 全同)、fzf'
         '- 其它:tmux、jq、zoxide(`z` 跳目录,仅交互 shell 可用——你跑命令是非交互 bash,z 不在,直接用 cd/绝对路径)、git;用户交互 shell 是 fish,你跑命令走 bash'
+        '- Node 依赖传送门 vmdeps:`vmdeps mount <项目名|路径>` 给项目内各 package.json 的 node_modules 建指向 `~/deps` 的 bind 挂载(monorepo 自动覆盖全部子包;`vmdeps status` 看状态)——建好后直接在共享盘项目目录 pnpm install/test,详见下方"工作模式"'
         '- shell 配置双写规则:给交互体验加的东西写 fish 的 ~/.config/fish/config.fish;要让 bash 也用上的(PATH/别名/函数)写 /etc/profile.d/(登录 shell 加载)——注意 ~/.bashrc 开头有非交互 return,追加内容对非交互 shell 无效;系统级 PATH(/usr/local/bin、JAVA_HOME、nvm 桥)对所有进程天生可见,无需配置'
-        '- 共享盘(挂载进来的 workspace)是 sshfs,无执行权限:chmod +x 也跑不了二进制;rg/git 大扫描共享盘也慢。依赖与产物怎么放见下方"工作模式"节'
+        '- 共享盘(挂载进来的 workspace)是 sshfs:文件一律没有执行位且 chmod 存不住(文件真身存 Windows 磁盘,记不住该标记),共享盘上的二进制跑不了;rg/git 大扫描共享盘也慢。Node 依赖怎么放见下方"工作模式"节的 vmdeps'
         ''
     )
     if (@($Mappings).Count -gt 0) {
@@ -801,7 +802,7 @@ function Set-VMClaudeMemory {
             '### 工作模式(与用户协作)'
             ''
             '- 共享盘 workspace 是源码真身:改代码直接落共享盘,用户在宿主机 Windows 立即可见、可验收'
-            '- VM 自测的依赖/产物放本地盘(共享盘 noexec):Python venv → `~/venvs/<proj>`(uv 已配清华镜像,源码仍读共享盘);Node 在 `~/build/<proj>` 建可运行副本再 `pnpm install`(node_modules 不进共享盘,避免污染用户 Windows 侧的);Java 不受限,直接在共享盘 `mvn`/`java -jar`,编译慢再把 target 指到 `~/build`'
+            '- VM 自测的依赖/产物放本地盘:Python venv → `~/venvs/<proj>`(uv 已配清华镜像,源码仍读共享盘);Node 项目先 `vmdeps mount <proj>` 建传送门,之后**直接在共享盘项目目录 `pnpm install`/`pnpm test`**——依赖实际落 `~/deps/<proj>`(可执行、不污染用户 Windows 侧;Windows 侧如有自己的 node_modules 与 VM 侧互不可见,各用各的),源码零副本、测到的永远是共享盘最新代码,不存在旧副本问题;Java 不受限,直接在共享盘 `mvn`/`java -jar`,编译慢再把 target 指到 `~/build`'
             '- 每自测通过一项,顺手附一句"宿主机怎么跑"的验收命令'
         )
     }
@@ -1137,6 +1138,73 @@ function Invoke-BundlePhase {
     Complete-BundleProgress -Progress $bundleProgress
 }
 
+# vmdeps 依赖传送门 + fd 链接(幂等,每次 start 刷新;失败只警告不阻塞——增强件不是依赖)
+# vmdeps:共享盘 Node 项目 node_modules → ~/deps bind mount,源码零副本直测(设计见 assets/vmdeps.sh 头注释)
+function Install-VmTools {
+    Write-Step '装 vmdeps 传送门工具 + fd 链接...'
+    $vmdepsHost = Join-Path $assetsDir 'vmdeps.sh'
+    if (-not (Test-Path $vmdepsHost)) {
+        Write-Warn '缺 assets/vmdeps.sh,跳过(依赖传送门不可用)'
+        return
+    }
+    # LF 归一化:工作区行尾可能是 CRLF,bash 吃 CRLF 会炸(仿前端兜底先例)
+    $tmpScript = Join-Path $env:TEMP 'cc-sandbox-vmdeps.sh'
+    [System.IO.File]::WriteAllText($tmpScript, ((Get-Content -Raw $vmdepsHost) -replace "`r`n", "`n"), (New-Object System.Text.UTF8Encoding($false)))
+    $t = Invoke-Multipass -ArgumentList @('transfer', $tmpScript, "${vmName}:/tmp/vmdeps.sh") -TimeoutSec 30
+    if ($t.TimedOut -or $t.ExitCode -ne 0) { Write-Warn 'vmdeps.sh 传入 VM 失败(下次 start 重试)'; return }
+    # fd 命名统一:Ubuntu fd-find 包的二进制叫 fdfind;链接后 fish/bash/非交互 shell 敲 fd 全通。
+    # (cloud-init runcmd 里有同款链接,两处互为镜像,改动需同步)
+    $installCmd = 'install -m 0755 /tmp/vmdeps.sh /usr/local/bin/vmdeps && ' +
+        '{ [ -e /usr/local/bin/fd ] || ln -sfn /usr/bin/fdfind /usr/local/bin/fd; } && ' +
+        'vmdeps --help >/dev/null 2>&1 && fd --version >/dev/null 2>&1 && echo TOOLS-OK'
+    $r = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'sudo', 'bash', '-c', $installCmd) -TimeoutSec 60
+    if ($r.TimedOut -or $r.ExitCode -ne 0) {
+        $err = if ($r.TimedOut) { '超时' } elseif ($r.Stderr) { $r.Stderr.Trim() } else { '(无 stderr)' }
+        Write-Warn "vmdeps/fd 安装自检失败(下次 start 重试):$err"
+        return
+    }
+    Write-Ok 'vmdeps → /usr/local/bin(→ fdfind 链接就位)'
+
+    # 开机自愈 systemd 单元:VM 内 reboot 后按注册表重挂传送门(共享盘 sshfs 挂载由 Multipass daemon
+    # 自己重建,此单元只补 bind 层;start 流程还会显式跑 vmdeps auto,双保险)
+    $unit = @'
+[Unit]
+Description=cc-sandbox vmdeps portal healer (bind mounts for shared node_modules)
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/vmdeps auto
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+'@
+    $tmpUnit = Join-Path $env:TEMP 'cc-sandbox-vmdeps.service'
+    [System.IO.File]::WriteAllText($tmpUnit, ($unit -replace "`r`n", "`n"), (New-Object System.Text.UTF8Encoding($false)))
+    $t2 = Invoke-Multipass -ArgumentList @('transfer', $tmpUnit, "${vmName}:/tmp/vmdeps.service") -TimeoutSec 30
+    if ($t2.TimedOut -or $t2.ExitCode -ne 0) {
+        Write-Warn 'vmdeps systemd 单元传入 VM 失败(开机自愈缺失,下次 start 重试)'
+    } else {
+        $unitCmd = 'install -m 0644 /tmp/vmdeps.service /etc/systemd/system/vmdeps.service && ' +
+            'systemctl daemon-reload && systemctl enable vmdeps.service >/dev/null 2>&1 && echo UNIT-OK'
+        $r2 = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'sudo', 'bash', '-c', $unitCmd) -TimeoutSec 60
+        if ($r2.TimedOut -or $r2.ExitCode -ne 0) {
+            Write-Warn 'vmdeps systemd 单元启用失败(开机自愈缺失,下次 start 重试)'
+        } else {
+            Write-Ok 'vmdeps.service 开机自愈已启用'
+        }
+    }
+
+    # start 自愈:workspace 刚重挂,此刻补 bind 层正合适(无注册项目则空跑,幂等)
+    $r3 = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'vmdeps', 'auto') -TimeoutSec 60
+    if ($r3.TimedOut -or $r3.ExitCode -ne 0) {
+        Write-Warn 'vmdeps auto 补挂失败(进 VM 手动跑 vmdeps auto)'
+    } else {
+        Write-Ok 'vmdeps 传送门已按注册表补挂'
+    }
+}
+
 # 挂载:.claude-host(硬 RO)+ VM 本地 workspace + mounts.txt 子目录 + path-map 写入
 function Invoke-MountPhase {
     param(
@@ -1177,6 +1245,9 @@ function Invoke-MountPhase {
     if (-not (Mount-WorkspaceSubdirs -Mounts $Mounts)) {
         throw "一个或多个额外挂载失败,停止启动以避免 workspace 数据位置不确定"
     }
+
+    # vmdeps 传送门工具 + fd 链接(共享盘挂载已就位,正好接 bind 层;幂等自愈)
+    Install-VmTools
 
     # VM 记忆块(可选特性 path-map + 开发环境共用,非重建型,现有 VM 立即生效):
     # 挂载已定,按实际映射 + 实际装好的环境生成;任一启用就写块,都不启用才移除
