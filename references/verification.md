@@ -589,6 +589,58 @@ Remove-Item -Recurse -Force F:\<共享目录>\vmdeps-e2e
 
 ---
 
+## 测试 13:opencode 记忆共享 + 权限全开(建议跑)
+
+**目的**:验证 start 后 opencode 与 Claude Code 共读同一份全局记忆(AGENTS.md 软链),且 opencode.json 的 permission 全开(不再逐步弹确认);旧 VM 由 start 自愈补上生成器,无需重建。
+
+### 步骤
+
+```powershell
+# (a) start 收尾应有两行(记忆块之后、无条件执行,与特性勾选无关)
+.\scripts\launch.ps1 start
+# 预期:"opencode 全局记忆已接上(AGENTS.md → ~/.claude/CLAUDE.md 软链,两个 agent 共读一份)"、
+#       "opencode 权限已全开(permission * = allow,不再逐步弹确认)"
+
+# (b) 软链就位且指向正确
+multipass exec claude-dev -- bash -c "readlink /home/ubuntu/.config/opencode/AGENTS.md"
+# 预期:/home/ubuntu/.claude/CLAUDE.md
+multipass exec claude-dev -- bash -c "test -L /home/ubuntu/.config/opencode/AGENTS.md && echo LINK"
+multipass exec claude-dev -- bash -c "cmp /home/ubuntu/.claude/CLAUDE.md /home/ubuntu/.config/opencode/AGENTS.md && echo SAME"
+# 预期:LINK、SAME(同一文件,含 path-map/dev-env 记忆块时两边内容一致)
+
+# (c) 生成器与已生成的 opencode.json 都带 permission(新 VM 原生带;旧 VM 由 start 自愈 sed 插入)
+multipass exec claude-dev -- bash -c "grep -c permission /etc/profile.d/07-opencode-config.sh /home/ubuntu/.config/fish/config.fish"
+# 预期:两个文件各 ≥ 1(重建的 VM 原生就有;现存旧 VM 第一次 start 后补上)
+multipass exec claude-dev -- bash -c "jq -c '.permission' ~/.config/opencode/opencode.json"
+# 预期:{"*":"allow"}(cc-switch 模式下;宿主机没配 cc-switch 时无此文件,跳过本项)
+
+# (d) sync 重新生成后 permission 仍在(生成器真正带上,不是一次性修补)
+multipass exec claude-dev -- sudo -u ubuntu bash -lc "source /etc/profile.d/07-opencode-config.sh; sync_opencode_config; jq -c '.permission' ~/.config/opencode/opencode.json"
+multipass exec claude-dev -- sudo -u ubuntu fish -c "sync_opencode_config; jq -c '.permission' ~/.config/opencode/opencode.json"
+# 预期:两条都输出 {"*":"allow"}
+
+# (e) 幂等:重复 start 不报错;软链不变形(仍是软链);生成器不二次插入
+.\scripts\launch.ps1 start
+multipass exec claude-dev -- bash -c "test -L /home/ubuntu/.config/opencode/AGENTS.md && grep -c permission /etc/profile.d/07-opencode-config.sh"
+# 预期:LINK + 计数不变(不累积)
+
+# (f) 真人验收:VM 里跑 opencode,让它编辑文件 / 跑命令,应直接执行不再弹确认;
+#     对它说"看下 D:\<挂载目录>\...\某文件"应按记忆块换算路径(勾了 path-map 时)
+```
+
+### 预期汇总
+
+| 检查项 | 预期 |
+|---|---|
+| (a) start 输出 | 记忆软链 + 权限全开两行 Ok |
+| (b) 软链 | readlink → `~/.claude/CLAUDE.md`;`-L` 判定 LINK;cmp SAME |
+| (c) permission | 两个生成器各 ≥ 1 处;opencode.json 的 `.permission` = `{"*":"allow"}` |
+| (d) sync 后 | bash/fish 两条 sync 重新生成,permission 仍在 |
+| (e) 幂等 | 重复 start 无报错;软链未变形、生成器计数不累积 |
+| (f) 真人验收 | opencode 不再逐步弹确认;贴宿主机路径能换算 |
+
+---
+
 ## 发现问题怎么办
 
 按现象查 [troubleshooting.md](./troubleshooting.md):

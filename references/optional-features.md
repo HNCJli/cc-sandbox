@@ -2,17 +2,18 @@
 
 ## 宿主机路径自动换算(路径映射记忆)
 
-勾选后,`start` 会在挂载完成后往 **VM 内** Claude Code 的全局记忆(`~/.claude/CLAUDE.md`)写入"沙箱说明 + 宿主机↔VM 路径映射表"(只含 workspace 挂载,按本次 mounts.txt 实际挂载生成,每条挂载一项)。之后在 VM 里的 Claude Code 对话中**直接贴宿主机 Windows 路径**即可,如:
+勾选后,`start` 会在挂载完成后往 **VM 内** Claude Code 的全局记忆(`~/.claude/CLAUDE.md`)写入"沙箱说明 + 宿主机↔VM 路径映射表"(只含 workspace 挂载,按本次 mounts.txt 实际挂载生成,每条挂载一项)。之后在 VM 里的 Claude Code / opencode 对话中**直接贴宿主机 Windows 路径**即可,如:
 
 ```
 看下 D:\multipass-share-dir-worksapce\share-dir-01\test-project\.gitignore
 ```
 
-VM 里的 Claude Code 按表换算成 `/home/ubuntu/workspace/share-dir-01/test-project/.gitignore` 再读写,也会在展示文件位置时反向换算回 Windows 路径。
+VM 里的 Claude Code / opencode 按表换算成 `/home/ubuntu/workspace/share-dir-01/test-project/.gitignore` 再读写,也会在展示文件位置时反向换算回 Windows 路径。
 
 - 勾选方式同 Tailscale:交互菜单空格勾选,或直接编辑 `features.txt` 加一行 `path-map`
 - **非重建型**:勾上后现有 VM 下次 `start` 即写入,不需要 delete + start;每次 start 按当前挂载刷新
 - 取消勾选后,下次 `start` 映射节即消失;若同时未勾选任何 dev-* 环境,整块移除(`CLAUDE.md` 中标记 `<!-- cc-sandbox:begin/end -->` 之间的内容,块外自己写的内容不动)——路径映射与预装环境共用同一个 managed block
+- opencode 的全局记忆 `~/.config/opencode/AGENTS.md` 是 start 自动维护的软链,指向 `~/.claude/CLAUDE.md`:两个 agent 共读同一份记忆(含映射表和块外自写内容),上面说的换算行为对 opencode 同样生效
 
 ## 剪贴板图片粘贴(clip-bridge)
 
@@ -56,7 +57,7 @@ VM 里的 Claude Code 按表换算成 `/home/ubuntu/workspace/share-dir-01/test-
 
 - **离线件从哪来**:`.\scripts\prepare-bundle.ps1` 交互终端跑一次,菜单里给 JDK/Maven/SDKMAN/uv/pnpm/Node 选装版本(默认跳过,选了才下;非交互跑不会自动下这几百 MB)。装进 VM 的就是当时选定的版本
 - 现有 VM 首次勾选:VM 内 `.bundle` 还留着对应件就离线补装,否则走在线兜底;之后 delete + start 重建的 VM 全走离线秒装
-- 装好后写进 VM 里 Claude Code 的全局记忆(`~/.claude/CLAUDE.md` 的 managed block):VM 里的 claude 知道自己有哪些环境、uv/pnpm 怎么用
+- 装好后写进 VM 里 Claude Code 的全局记忆(`~/.claude/CLAUDE.md` 的 managed block;opencode 经 AGENTS.md 软链共读):VM 里的 claude / opencode 知道自己有哪些环境、uv/pnpm 怎么用
 - 与"路径映射记忆"**共用同一个 managed block**:任一启用就写,全部取消勾选才移除整块
 - 安装失败只警告不阻塞 start(环境是增强不是依赖);重跑 `start` 自愈
 - 取消勾选只是"不再管理":装好的包留在 VM 里,记忆块也不再提它(想彻底清掉用 delete + start 重建)

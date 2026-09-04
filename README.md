@@ -93,7 +93,7 @@ Windows 宿主机
 └─ Multipass VM "claude-dev"      Ubuntu 24.04 (noble)
      ├─ ubuntu 用户(非 root,免密 sudo)
      ├─ Claude Code                bundle 离线装
-     ├─ opencode                   bundle 离线装(LLM 配置同 cc-switch env 生成)
+     ├─ opencode                   bundle 离线装(LLM 配置同 cc-switch env 生成;权限全开,记忆与 claude 共享)
      ├─ Fish + fzf + zoxide + tmux
      ├─ ~/.claude/settings.json    只含 env(白名单),RO
      ├─ ~/.claude-host/            ← 宿主机 ~/.claude 整目录挂载(内核层硬 RO)

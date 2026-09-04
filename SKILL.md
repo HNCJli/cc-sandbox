@@ -95,9 +95,9 @@ opencode        # 另一个预装的 AI 编码 agent,LLM 配置与 claude 同源
 
 进 VM 是 fish 提示符:灰色历史建议(`→` 或 `Ctrl+F` 接受)、`Ctrl+R` 模糊搜历史、`z <关键词>` 跳目录(zoxide)。临时要 bash 敲 `bash`。
 
-每次敲 `claude` / `opencode` 前(fish 和 bash 都一样)profile 脚本会自动重新同步 env,宿主机 cc-switch 切 provider 后 VM 会跟上。opencode 的配置(`~/.config/opencode/opencode.json`)从同一份 cc-switch env 生成:base_url/token 相同、自动补 `/v1` 路径、模型表注册 Claude Code 全部模型别名字段(MODEL/OPUS/SONNET/HAIKU/FABLE/SUBAGENT,按值去重——别名映射到不同模型时 opencode 里可随时切换),默认模型取 `ANTHROPIC_MODEL`(缺省 `claude-sonnet-4-5`),走同一条反向隧道;宿主机没配 cc-switch 时不生成配置,VM 里 `opencode auth login` 自己认证。
+每次敲 `claude` / `opencode` 前(fish 和 bash 都一样)profile 脚本会自动重新同步 env,宿主机 cc-switch 切 provider 后 VM 会跟上。opencode 的配置(`~/.config/opencode/opencode.json`)从同一份 cc-switch env 生成:base_url/token 相同、自动补 `/v1` 路径、模型表注册 Claude Code 全部模型别名字段(MODEL/OPUS/SONNET/HAIKU/FABLE/SUBAGENT,按值去重——别名映射到不同模型时 opencode 里可随时切换),默认模型取 `ANTHROPIC_MODEL`(缺省 `claude-sonnet-4-5`),走同一条反向隧道;宿主机没配 cc-switch 时不生成配置,VM 里 `opencode auth login` 自己认证。opencode 的权限已全开(配置里 `permission: {"*": "allow"}`,编辑/跑命令等不再逐步弹确认,对齐 claude `--dangerously-skip-permissions` 的用法);全局记忆与 claude 共享同一份 `~/.claude/CLAUDE.md`(`~/.config/opencode/AGENTS.md` 软链指向它,start 自动维护)。
 
-**贴宿主机路径**:勾选了"路径映射记忆"特性时,VM 里 Claude Code 的全局记忆(`~/.claude/CLAUDE.md`)带宿主机↔VM 路径映射表,对话里直接贴 Windows 路径(如 `D:\...\share-dir-01\test-project\.gitignore`),它会自动换算成挂载点路径(`/home/ubuntu/workspace/share-dir-01/test-project/.gitignore`)再操作。
+**贴宿主机路径**:勾选了"路径映射记忆"特性时,VM 里 Claude Code / opencode 的全局记忆(`~/.claude/CLAUDE.md`,opencode 经 AGENTS.md 软链共读)带宿主机↔VM 路径映射表,对话里直接贴 Windows 路径(如 `D:\...\share-dir-01\test-project\.gitignore`),它会自动换算成挂载点路径(`/home/ubuntu/workspace/share-dir-01/test-project/.gitignore`)再操作。
 
 **贴图**:勾选了"剪贴板图片粘贴"特性时,宿主机截图后 VM 里 Claude Code 按 `Ctrl+Shift+V` 粘贴(`Ctrl+V` 保持终端原生文本粘贴;claude 键位由 start 自动写入 `~/.claude/keybindings.json`)。桥由 start 自动拉起(宿主 PowerShell 常驻服务 + 专享反向隧道 + VM 垫片),`multipass shell` / `ssh` 进 VM 均可,详见 [references/optional-features.md](references/optional-features.md)。
 

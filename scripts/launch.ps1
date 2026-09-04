@@ -735,6 +735,8 @@ function Set-HostMountReadOnly {
 # ====== VM 内 Claude Code 全局记忆 managed block(可选特性 path-map + 开发环境共用) ======
 # 往 VM 本地 ~/.claude/CLAUDE.md 写 managed block(<!-- cc-sandbox:begin/end --> 标记之间,
 # 每次 start 整块刷新,块外用户自己写的内容保留)。
+# opencode 经 ~/.config/opencode/AGENTS.md 软链共读这份 CLAUDE.md(见 Set-VMOpenencodeMemoryLink),
+# 本函数只写 CLAUDE.md 一处,两个 agent 同生效;勿对 AGENTS.md 跑 sed -i(会把软链替换成普通文件)。
 # -Mappings 写"宿主机↔VM 路径映射"节(path-map 勾选时);
 # -DevEnvs 写"预装开发环境"节(开发环境勾选且装好时);
 # 任一非空就写块;两者皆空 + -Remove 才删块(幂等,无块时无操作)。
@@ -842,6 +844,85 @@ function Set-VMClaudeMemory {
     if (@($Mappings).Count -gt 0) { $desc += "路径映射 $($Mappings.Count) 条" }
     if (@($DevEnvs).Count -gt 0) { $desc += "开发环境 $($DevEnvs.Count) 项" }
     Write-Ok "已写入 VM ~/.claude/CLAUDE.md 记忆块($($desc -join ';'))"
+}
+
+# ====== opencode 全局记忆共享(每次 start 幂等) ======
+# opencode 的全局记忆是 ~/.config/opencode/AGENTS.md(claude code 是 ~/.claude/CLAUDE.md);
+# 这里把 AGENTS.md 做成指向 CLAUDE.md 的软链——两个 agent 共读同一份记忆(含上方 managed
+# block 与块外用户自写内容),永不漂移。块维护只碰 CLAUDE.md,软链自动跟随。
+# AGENTS.md 已是用户自建的普通文件时保留不覆盖(warn);软链缺失/悬空/指错则矫正。
+# 失败只警告不 throw(opencode 读不到 claude 记忆不影响 VM 可用性,对齐 Try-Mount 语义)
+function Set-VMOpenencodeMemoryLink {
+    # 退出码:0 = 软链就位;3 = AGENTS.md 是用户普通文件(保留不覆盖);1 = 失败
+    $script = 'mkdir -p /home/ubuntu/.claude /home/ubuntu/.config/opencode || exit 1; touch /home/ubuntu/.claude/CLAUDE.md || exit 1; f=/home/ubuntu/.config/opencode/AGENTS.md; if [ -e "$f" ] && [ ! -L "$f" ]; then exit 3; fi; ln -sfn /home/ubuntu/.claude/CLAUDE.md "$f" || exit 1; exit 0'
+    $r = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'bash', '-c', $script) -TimeoutSec 30
+    if ($r.TimedOut) {
+        Write-Warn "opencode 记忆共享检查超时(不影响其他功能)"
+        return
+    }
+    switch ($r.ExitCode) {
+        0   { Write-Ok "opencode 全局记忆已接上(AGENTS.md → ~/.claude/CLAUDE.md 软链,两个 agent 共读一份)" }
+        3   { Write-Warn "~/.config/opencode/AGENTS.md 已是用户自建普通文件,保留不覆盖(opencode 记忆与 claude 各自独立)" }
+        default {
+            $err = if ($r.Stderr) { $r.Stderr.Trim() } else { "(无 stderr)" }
+            Write-Warn "opencode 记忆软链失败:$err(opencode 读不到 claude 的记忆,其余不受影响)"
+        }
+    }
+}
+
+# ====== VM 内 opencode 权限自愈(每次 start 幂等) ======
+# opencode 默认 edit/bash/webfetch 等工具动作都要人工确认;生成器写进 "permission": {"*": "allow"}
+# 全放开,对齐 VM 里 claude --dangerously-skip-permissions 的最大权限用法。
+# 新 VM:cloud-init 的 07-opencode-config.sh / fish config.fish 生成器原生带 permission 段
+# (互为镜像,改动需同步);旧 VM 生成器没有——本函数 transfer 补丁脚本进去,往两个生成器的
+# jq 程序里插 permission 段(锚点 "$schema",已带则整段跳过),并顺手补当前已生成的 opencode.json。
+# 失败只警告不 throw(权限没开只影响确认弹窗,不影响 VM 可用性,对齐 Try-Mount 语义)
+function Set-VMOpenencodePerms {
+    # 补丁脚本经 transfer 传入(避免引号/换行穿透 exec 传参),UTF-8 无 BOM;行尾用 `n 显式 LF
+    $lines = @(
+        '#!/bin/bash'
+        '# cc-sandbox: opencode 权限自愈(launch.ps1 transfer 进来执行,幂等)'
+        '# 与 assets/cloud-init.yaml 的两个生成器互为镜像(改动需同步):'
+        '#   生成器 jq 程序里的 "$schema" 锚点前插 "permission": {"*": "allow"},'
+        '#   生成器已带 permission 段(新 VM)则整段跳过'
+        'set -u'
+        'for f in /etc/profile.d/07-opencode-config.sh "$HOME/.config/fish/config.fish"; do'
+        '    [ -f "$f" ] || continue'
+        '    grep -qF ''"permission"'' "$f" && continue'
+        '    if ! grep -qF ''"$schema"'' "$f"; then'
+        '        echo "cc-sandbox: $f 缺 \$schema 锚点,跳过权限自愈" >&2'
+        '        continue'
+        '    fi'
+        '    sudo sed -i ''s#"\$schema"#"permission": { "*": "allow" }, "\$schema"#'' "$f" || exit 1'
+        'done'
+        '# 当前已生成的 opencode.json 直接补上(之后每次 sync 由修好的生成器产出)'
+        'cfg="$HOME/.config/opencode/opencode.json"'
+        'if [ -f "$cfg" ]; then'
+        '    jq ''. + {permission: {"*": "allow"}}'' "$cfg" > "$cfg.cc-tmp" 2>/dev/null && mv "$cfg.cc-tmp" "$cfg" || rm -f "$cfg.cc-tmp"'
+        'fi'
+        'exit 0'
+    )
+    $script = $lines -join "`n"
+    $patchHost = Join-Path $env:TEMP "cc-sandbox-oc-perm.sh"
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($patchHost, $script + "`n", $utf8NoBom)
+
+    $transfer = Invoke-Multipass -ArgumentList @('transfer', $patchHost, "${vmName}:/tmp/cc-sandbox-oc-perm.sh") -TimeoutSec 30
+    if ($transfer.TimedOut -or $transfer.ExitCode -ne 0) {
+        $err = if ($transfer.TimedOut) { "超时" } elseif ($transfer.Stderr) { $transfer.Stderr.Trim() } else { "(无 stderr)" }
+        Write-Warn "opencode 权限补丁传入 VM 失败:$err(VM 里 opencode 仍会逐步要确认,其余不受影响)"
+        return
+    }
+    $r = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'bash', '/tmp/cc-sandbox-oc-perm.sh') -TimeoutSec 60
+    # 无论成败都清掉 VM 内临时脚本
+    $null = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'rm', '-f', '/tmp/cc-sandbox-oc-perm.sh') -TimeoutSec 30
+    if ($r.TimedOut -or $r.ExitCode -ne 0) {
+        $err = if ($r.TimedOut) { "超时" } elseif ($r.Stderr) { $r.Stderr.Trim() } else { "(无 stderr)" }
+        Write-Warn "opencode 权限自愈失败:$err(VM 里 opencode 仍会逐步要确认,其余不受影响)"
+        return
+    }
+    if ($r.Stderr) { Write-Host "    $($r.Stderr.Trim())" -ForegroundColor DarkGray }
+    Write-Ok "opencode 权限已全开(permission * = allow,不再逐步弹确认)"
 }
 
 # ====== mounts.txt:读取 ======
@@ -1262,6 +1343,11 @@ function Invoke-MountPhase {
     } else {
         Set-VMClaudeMemory -Remove
     }
+
+    # opencode 与 claude 同源(非重建型,现有 VM 下次 start 即生效,无条件执行):
+    # 记忆 = AGENTS.md 软链共读 CLAUDE.md;权限 = permission * allow 全开(旧 VM 由补丁自愈)
+    Set-VMOpenencodeMemoryLink
+    Set-VMOpenencodePerms
 }
 
 # SSH 反向隧道(仅当宿主机 ANTHROPIC_BASE_URL 指向本地代理时;公网直连则跳过)
