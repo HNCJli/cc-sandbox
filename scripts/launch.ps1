@@ -925,6 +925,27 @@ function Set-VMOpenencodePerms {
     Write-Ok "opencode 权限已全开(permission * = allow,不再逐步弹确认)"
 }
 
+# ====== VM 内 opencode 模型同步器更新(每次 start 幂等) ======
+# cc-switch 本地代理会把 *_MODEL 写成 Claude 角色路由别名，真实请求模型在 *_MODEL_NAME。
+# 独立同步器优先使用 NAME 字段，避免 OpenCode 的 /model 菜单误显示 Claude 路由名。
+function Set-VMOpenencodeModelSync {
+    $syncHost = Join-Path $assetsDir 'sync-opencode-config.sh'
+    $transfer = Invoke-Multipass -ArgumentList @('transfer', $syncHost, "${vmName}:/tmp/cc-sync-opencode-config") -TimeoutSec 30
+    if ($transfer.TimedOut -or $transfer.ExitCode -ne 0) {
+        $err = if ($transfer.TimedOut) { "超时" } elseif ($transfer.Stderr) { $transfer.Stderr.Trim() } else { "(无 stderr)" }
+        Write-Warn "opencode 模型同步器传入 VM 失败:$err"
+        return
+    }
+    $script = 'install -m 0755 /tmp/cc-sync-opencode-config /home/ubuntu/.local/bin/cc-sync-opencode-config && rm -f /tmp/cc-sync-opencode-config && /home/ubuntu/.local/bin/cc-sync-opencode-config --install-wrappers && /home/ubuntu/.local/bin/cc-sync-opencode-config'
+    $r = Invoke-Multipass -ArgumentList @('exec', $vmName, '--', 'bash', '-c', $script) -TimeoutSec 60
+    if ($r.TimedOut -or $r.ExitCode -ne 0) {
+        $err = if ($r.TimedOut) { "超时" } elseif ($r.Stderr) { $r.Stderr.Trim() } else { "(无 stderr)" }
+        Write-Warn "opencode 模型同步失败:$err"
+        return
+    }
+    Write-Ok "opencode 模型已按 cc-switch 实际请求模型同步"
+}
+
 # ====== mounts.txt:读取 ======
 # 返回 string[];配置文件不存在/为空 → 返回空数组(调用方跳过)
 function Get-MountEntries {
@@ -1348,6 +1369,7 @@ function Invoke-MountPhase {
     # 记忆 = AGENTS.md 软链共读 CLAUDE.md;权限 = permission * allow 全开(旧 VM 由补丁自愈)
     Set-VMOpenencodeMemoryLink
     Set-VMOpenencodePerms
+    Set-VMOpenencodeModelSync
 }
 
 # SSH 反向隧道(仅当宿主机 ANTHROPIC_BASE_URL 指向本地代理时;公网直连则跳过)

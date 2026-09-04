@@ -227,7 +227,7 @@ multipass exec claude-dev -- bash -lc "jq -r '.model' ~/.config/opencode/opencod
 - `INSTALLED`(bundle 离线安装,`install-bundle.sh` 最后一步 `command -v cc-pocket-daemon` 强制)
 - 若 `NOT_INSTALLED`:说明 bundle 缺 cc-pocket 离线包,`launch.ps1 start` 会在启动前报错;先 `.\scripts\prepare-bundle.ps1` 补齐,再 `delete + start`。
 - `type -P` 输出 opencode 路径(symlink → /opt/tools/opencode/<ver>/bin/opencode),`--version` 正常(缺失同样说明 bundle 不齐,`install-bundle.sh` 自检 `command -v opencode` 强制)
-- baseURL = 宿主机 base_url 补 `/v1`(如 `http://127.0.0.1:15721/v1`);models = Claude Code 全部模型别名字段(MODEL/OPUS/SONNET/HAIKU/FABLE/SUBAGENT)非空值按值去重后的集合(别名都指同一模型时只有 1 个),默认 model = `ANTHROPIC_MODEL`(缺省 `claude-sonnet-4-5`)。`NO_CONFIG` = 宿主机没配 cc-switch env(公网直连),属正常——VM 里 `opencode auth login` 自己认证
+- baseURL = 宿主机 base_url 补 `/v1`(如 `http://127.0.0.1:15721/v1`);models 优先取 `*_MODEL_NAME` 真实请求模型并按值去重(旧配置无 NAME 时回退 `*_MODEL`),不注册“不显示在 /model 菜单”的 Subagent;默认 model 按 `settings.json` 的 `model` 角色选择。`NO_CONFIG` = 宿主机没配 cc-switch env(公网直连),属正常——VM 里 `opencode auth login` 自己认证
 - 模型表展开(应与宿主机 settings.json 各 `*MODEL` 字段的去重集合一致):`multipass exec claude-dev -- bash -lc "jq -r '.provider[].models | keys[]' ~/.config/opencode/opencode.json"`
 
 ---

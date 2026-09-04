@@ -88,8 +88,8 @@ write_files:
     permissions: '0644'
     content: |
       # 把宿主机 cc-switch 的 LLM env 同步进 opencode 配置(每次敲 opencode 前重新生成)。
-      # 模型表:注册 Claude Code 全部模型别名字段(MODEL/OPUS/SONNET/HAIKU/FABLE/SUBAGENT),
-      # 按值去重——别名映射到不同模型时 opencode 里可随时切;默认模型 = ANTHROPIC_MODEL
+      # 模型表:优先注册 cc-switch 的 *_MODEL_NAME(真实请求模型),旧版配置无 NAME 字段时
+      # 才回退 *_MODEL 路由别名;按值去重。默认模型按 settings.json 的 model 角色选择。
       # 权限:* = allow 全放开,对齐 claude --dangerously-skip-permissions;
       # 旧 VM 由 launch.ps1 Set-VMOpenencodePerms 自愈补丁插同款段(互为镜像,改动需同步)
       sync_opencode_config() {
@@ -106,14 +106,23 @@ write_files:
           esac
           mkdir -p "$HOME/.config/opencode"
           jq -n --arg b "$_oc_base" --arg k "$_oc_key" --rawfile cfg "$HOME/.claude-host/settings.json" '
-              (($cfg | fromjson | .env) // {}) as $e
-              | (if ($e.ANTHROPIC_MODEL // "") == "" then "claude-sonnet-4-5" else $e.ANTHROPIC_MODEL end) as $dflt
-              | [ $dflt,
-                  $e.ANTHROPIC_DEFAULT_OPUS_MODEL   // "",
-                  $e.ANTHROPIC_DEFAULT_SONNET_MODEL // "",
-                  $e.ANTHROPIC_DEFAULT_HAIKU_MODEL  // "",
-                  $e.ANTHROPIC_DEFAULT_FABLE_MODEL  // "",
-                  $e.CLAUDE_CODE_SUBAGENT_MODEL     // "" ]
+              ($cfg | fromjson) as $c
+              | ($c.env // {}) as $e
+              | def actual($name; $route):
+                  if ($name // "") != "" then $name else ($route // "") end;
+              (if $c.model == "opus" then actual($e.ANTHROPIC_DEFAULT_OPUS_MODEL_NAME; $e.ANTHROPIC_DEFAULT_OPUS_MODEL)
+                 elif $c.model == "haiku" then actual($e.ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME; $e.ANTHROPIC_DEFAULT_HAIKU_MODEL)
+                 elif $c.model == "fable" then actual($e.ANTHROPIC_DEFAULT_FABLE_MODEL_NAME; $e.ANTHROPIC_DEFAULT_FABLE_MODEL)
+                 else actual($e.ANTHROPIC_DEFAULT_SONNET_MODEL_NAME; $e.ANTHROPIC_DEFAULT_SONNET_MODEL)
+                 end) as $selected
+              | (if $selected == "" then actual($e.ANTHROPIC_MODEL_NAME; $e.ANTHROPIC_MODEL) else $selected end) as $configured
+              | (if $configured == "" then "claude-sonnet-4-5" else $configured end) as $dflt
+              | [ actual($e.ANTHROPIC_MODEL_NAME; $e.ANTHROPIC_MODEL),
+                  actual($e.ANTHROPIC_DEFAULT_OPUS_MODEL_NAME; $e.ANTHROPIC_DEFAULT_OPUS_MODEL),
+                  actual($e.ANTHROPIC_DEFAULT_SONNET_MODEL_NAME; $e.ANTHROPIC_DEFAULT_SONNET_MODEL),
+                  actual($e.ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME; $e.ANTHROPIC_DEFAULT_HAIKU_MODEL),
+                  actual($e.ANTHROPIC_DEFAULT_FABLE_MODEL_NAME; $e.ANTHROPIC_DEFAULT_FABLE_MODEL),
+                  $dflt ]
                 | map(select(. != "")) | unique
                 | map({ key: ., value: { name: . } }) | from_entries
                 | {
@@ -134,7 +143,11 @@ write_files:
       sync_opencode_config
       # 每次敲 opencode 前重新同步(与 claude() 同款),cc-switch 切换后同一 shell 立即生效
       opencode() {
-          sync_opencode_config
+          if [ -x "$HOME/.local/bin/cc-sync-opencode-config" ]; then
+              "$HOME/.local/bin/cc-sync-opencode-config"
+          else
+              sync_opencode_config
+          fi
           command opencode "$@"
       }
 
@@ -182,11 +195,15 @@ write_files:
           end
           mkdir -p "$HOME/.config/opencode"
           # 权限:* = allow 全放开(同 bash 版;与 launch.ps1 Set-VMOpenencodePerms 自愈补丁互为镜像)
-          jq -n --arg b "$base_url" --arg k "$api_key" --rawfile cfg "$HOME/.claude-host/settings.json" '(($cfg | fromjson | .env) // {}) as $e | (if ($e.ANTHROPIC_MODEL // "") == "" then "claude-sonnet-4-5" else $e.ANTHROPIC_MODEL end) as $dflt | [ $dflt, $e.ANTHROPIC_DEFAULT_OPUS_MODEL // "", $e.ANTHROPIC_DEFAULT_SONNET_MODEL // "", $e.ANTHROPIC_DEFAULT_HAIKU_MODEL // "", $e.ANTHROPIC_DEFAULT_FABLE_MODEL // "", $e.CLAUDE_CODE_SUBAGENT_MODEL // "" ] | map(select(. != "")) | unique | map({ key: ., value: { name: . } }) | from_entries | { "permission": { "*": "allow" }, "$schema": "https://opencode.ai/config.json", "provider": { "cc-switch": { "npm": "@ai-sdk/anthropic", "options": { "baseURL": $b, "apiKey": $k }, "models": . } }, "model": ("cc-switch/" + $dflt) }' > "$HOME/.config/opencode/opencode.json.tmp"
+          jq -n --arg b "$base_url" --arg k "$api_key" --rawfile cfg "$HOME/.claude-host/settings.json" '($cfg | fromjson) as $c | ($c.env // {}) as $e | def actual($name; $route): if ($name // "") != "" then $name else ($route // "") end; (if $c.model == "opus" then actual($e.ANTHROPIC_DEFAULT_OPUS_MODEL_NAME; $e.ANTHROPIC_DEFAULT_OPUS_MODEL) elif $c.model == "haiku" then actual($e.ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME; $e.ANTHROPIC_DEFAULT_HAIKU_MODEL) elif $c.model == "fable" then actual($e.ANTHROPIC_DEFAULT_FABLE_MODEL_NAME; $e.ANTHROPIC_DEFAULT_FABLE_MODEL) else actual($e.ANTHROPIC_DEFAULT_SONNET_MODEL_NAME; $e.ANTHROPIC_DEFAULT_SONNET_MODEL) end) as $selected | (if $selected == "" then actual($e.ANTHROPIC_MODEL_NAME; $e.ANTHROPIC_MODEL) else $selected end) as $configured | (if $configured == "" then "claude-sonnet-4-5" else $configured end) as $dflt | [ actual($e.ANTHROPIC_MODEL_NAME; $e.ANTHROPIC_MODEL), actual($e.ANTHROPIC_DEFAULT_OPUS_MODEL_NAME; $e.ANTHROPIC_DEFAULT_OPUS_MODEL), actual($e.ANTHROPIC_DEFAULT_SONNET_MODEL_NAME; $e.ANTHROPIC_DEFAULT_SONNET_MODEL), actual($e.ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME; $e.ANTHROPIC_DEFAULT_HAIKU_MODEL), actual($e.ANTHROPIC_DEFAULT_FABLE_MODEL_NAME; $e.ANTHROPIC_DEFAULT_FABLE_MODEL), $dflt ] | map(select(. != "")) | unique | map({ key: ., value: { name: . } }) | from_entries | { "permission": { "*": "allow" }, "$schema": "https://opencode.ai/config.json", "provider": { "cc-switch": { "npm": "@ai-sdk/anthropic", "options": { "baseURL": $b, "apiKey": $k }, "models": . } }, "model": ("cc-switch/" + $dflt) }' > "$HOME/.config/opencode/opencode.json.tmp"
           mv "$HOME/.config/opencode/opencode.json.tmp" "$HOME/.config/opencode/opencode.json"
       end
       function opencode
-          sync_opencode_config
+          if test -x "$HOME/.local/bin/cc-sync-opencode-config"
+              "$HOME/.local/bin/cc-sync-opencode-config"
+          else
+              sync_opencode_config
+          end
           command opencode $argv
       end
 

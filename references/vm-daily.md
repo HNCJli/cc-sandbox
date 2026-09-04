@@ -24,7 +24,7 @@ VM 默认交互 shell 是 **Fish**(配 fzf + zoxide)。`multipass shell claude-d
 - **`z <关键词>`** 智能跳转目录(zoxide,基于使用频率)
 - 临时需要 bash 敲 `bash`;`.sh` 脚本和 cloud-init 仍走 bash
 
-每次敲 `claude` 前,fish 和 bash 一样会自动重新同步 cc-switch env(读 `~/.claude-host`,jq 过滤,写 `~/.claude/settings.json` chmod 444)。敲 `opencode` 同理:同步同一份 env 生成 `~/.config/opencode/opencode.json`(base_url 补 `/v1`;模型表注册 Claude Code 全部别名字段并去重,默认模型取 `ANTHROPIC_MODEL`),走同一条反向隧道。
+每次敲 `claude` 前,fish 和 bash 一样会自动重新同步 cc-switch env(读 `~/.claude-host`,jq 过滤,写 `~/.claude/settings.json` chmod 444)。敲 `opencode` 同理:同步同一份 env 生成 `~/.config/opencode/opencode.json`(base_url 补 `/v1`;模型优先取 `*_MODEL_NAME` 真实请求模型并去重,默认模型按 `settings.json` 的 `model` 角色选择),走同一条反向隧道。
 
 ## tmux 快捷键
 
